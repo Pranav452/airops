@@ -1,8 +1,33 @@
 @import "tailwindcss";
 
+/* ─── Design tokens ─────────────────────────────────────────────── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f9f9f7;
+  --foreground: #1c1c1a;
+
+  --surface:        #ffffff;
+  --surface-2:      #f5f5f3;
+  --surface-hover:  #f0f0ed;
+  --border:         #e6e6e2;
+  --border-2:       #d4d4cf;
+
+  --text:   #1c1c1a;
+  --text-2: #6b6b66;
+  --text-3: #9a9a94;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Column accent colours (keyed by status slug) */
+  --col-booking:   #6366f1;
+  --col-vessel:    #8b5cf6;
+  --col-approval:  #f59e0b;
+  --col-container: #3b82f6;
+  --col-stuffing:  #10b981;
+  --col-docs:      #84cc16;
+  --col-complete:  #15803d;
 }
 
 @theme inline {
@@ -12,15 +37,24 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
+/* ─── Base ──────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
 
 body {
   background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  color: var(--text);
+  font-family: var(--font-geist-sans, system-ui, sans-serif);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Scrollbars ────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+/* ─── Focus ring ────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
 }
