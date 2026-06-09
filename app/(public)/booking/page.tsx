@@ -1,6 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
+import { createClient } from "@/lib/supabase/client";
+
+const JOB_TYPE_OPTIONS = [
+  { value: "cc",      label: "CC – Custom Clearance" },
+  { value: "ff",      label: "FF – Freight Forwarding" },
+  { value: "x_works", label: "X Works – Ex-Works" },
+];
 
 const FIELDS = [
   { key: "order_no",            label: "Order No",            type: "text",   required: true },
@@ -15,20 +22,60 @@ const FIELDS = [
   { key: "pkgs_cases",          label: "Pkgs / Cases",        type: "text",   required: false },
 ] as const;
 
+type UploadedFile = { name: string; path: string; size: number };
+
 export default function BookingPage() {
   const [form, setForm] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // File upload state
+  const [files, setFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   function handleChange(key: string, value: string) {
     setForm((p) => ({ ...p, [key]: value }));
+  }
+
+  function addFiles(incoming: FileList | null) {
+    if (!incoming) return;
+    const allowed = Array.from(incoming).filter((f) => f.size <= 20 * 1024 * 1024);
+    setFiles((prev) => {
+      const names = new Set(prev.map((f) => f.name));
+      return [...prev, ...allowed.filter((f) => !names.has(f.name))];
+    });
+  }
+
+  function removeFile(name: string) {
+    setFiles((prev) => prev.filter((f) => f.name !== name));
+  }
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    addFiles(e.dataTransfer.files);
+  }, []);
+
+  async function uploadFiles(jobId: string): Promise<UploadedFile[]> {
+    const sb = createClient();
+    const results: UploadedFile[] = [];
+    for (const file of files) {
+      const path = `${jobId}/${Date.now()}_${file.name}`;
+      const { error: upErr } = await sb.storage.from("job-documents").upload(path, file);
+      if (!upErr) results.push({ name: file.name, path, size: file.size });
+    }
+    return results;
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    if (!form.job_type) { setError("Please select a Job Type."); return; }
     setLoading(true);
+    setUploading(files.length > 0);
     try {
       const data: Record<string, unknown> = {};
       for (const f of FIELDS) {
@@ -36,6 +83,8 @@ export default function BookingPage() {
           data[f.key] = f.type === "number" ? Number(form[f.key]) : form[f.key];
         }
       }
+      data.job_type = form.job_type;
+
       const res = await fetch("/api/airops/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -46,11 +95,25 @@ export default function BookingPage() {
         throw new Error(j.error ?? "Failed to submit");
       }
       const job = await res.json();
+
+      // Upload documents after job is created
+      if (files.length > 0) {
+        const uploaded = await uploadFiles(job.id);
+        if (uploaded.length > 0) {
+          await fetch(`/api/airops/jobs/${job.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ data: { documents: uploaded } }),
+          });
+        }
+      }
+
       setSuccess(job.id);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
+      setUploading(false);
     }
   }
 
@@ -79,7 +142,7 @@ export default function BookingPage() {
             Ref: {success.slice(0, 8).toUpperCase()}
           </p>
           <button
-            onClick={() => { setSuccess(null); setForm({}); }}
+            onClick={() => { setSuccess(null); setForm({}); setFiles([]); }}
             className="mt-6 w-full h-9 rounded-lg text-sm font-medium text-white"
             style={{ background: "#6366f1" }}
           >
@@ -147,6 +210,103 @@ export default function BookingPage() {
                 />
               </div>
             ))}
+
+            {/* Job Type */}
+            <div>
+              <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-2)" }}>
+                Job Type <span style={{ color: "#ef4444" }}>*</span>
+              </label>
+              <select
+                value={form.job_type ?? ""}
+                onChange={(e) => handleChange("job_type", e.target.value)}
+                className="w-full h-9 rounded-lg px-3 text-sm"
+                style={{
+                  background: "var(--surface-2)",
+                  border: "1px solid var(--border)",
+                  color: form.job_type ? "var(--text)" : "var(--text-3)",
+                  outline: "none",
+                }}
+              >
+                <option value="" disabled>Select job type…</option>
+                {JOB_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Document Upload */}
+          <div>
+            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-2)" }}>
+              Invoice &amp; Packing List
+              <span className="ml-1" style={{ color: "var(--text-3)", fontWeight: 400 }}>(optional — PDF, images, Excel)</span>
+            </label>
+
+            {/* Drop zone */}
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={onDrop}
+              onClick={() => fileInputRef.current?.click()}
+              style={{
+                border: `2px dashed ${dragOver ? "#6366f1" : "var(--border)"}`,
+                background: dragOver ? "#eef2ff" : "var(--surface-2)",
+                borderRadius: 10,
+                padding: "18px 12px",
+                textAlign: "center",
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={dragOver ? "#6366f1" : "var(--text-3)"} strokeWidth="1.6" strokeLinecap="round" className="mx-auto mb-2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              <p className="text-sm" style={{ color: dragOver ? "#6366f1" : "var(--text-3)" }}>
+                {dragOver ? "Drop files here" : "Drag & drop or click to select"}
+              </p>
+              <p className="text-xs mt-0.5" style={{ color: "var(--text-3)" }}>Max 20 MB per file</p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept=".pdf,.jpg,.jpeg,.png,.webp,.xls,.xlsx,.doc,.docx"
+                className="hidden"
+                onChange={(e) => addFiles(e.target.files)}
+              />
+            </div>
+
+            {/* File list */}
+            {files.length > 0 && (
+              <div className="mt-2 flex flex-col gap-1">
+                {files.map((f) => (
+                  <div
+                    key={f.name}
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg"
+                    style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" strokeWidth="2" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                      </svg>
+                      <span className="text-xs truncate" style={{ color: "var(--text-2)" }}>{f.name}</span>
+                      <span className="text-xs shrink-0" style={{ color: "var(--text-3)" }}>
+                        {(f.size / 1024 / 1024).toFixed(1)} MB
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(f.name)}
+                      style={{ color: "var(--text-3)", background: "none", border: "none", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "0 2px" }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {error && (
@@ -161,7 +321,7 @@ export default function BookingPage() {
             className="w-full h-10 rounded-lg text-sm font-medium text-white mt-2"
             style={{ background: loading ? "#a5b4fc" : "#6366f1" }}
           >
-            {loading ? "Submitting…" : "Submit Booking Request"}
+            {uploading ? "Uploading documents…" : loading ? "Submitting…" : "Submit Booking Request"}
           </button>
         </form>
       </div>

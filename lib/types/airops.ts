@@ -81,13 +81,29 @@ export interface AiropsJobData {
   container_release_info?: string;
   rdv_date?: string;
   odt_sent?: boolean;
+  odt_date?: string;
+  // Instructions Douane (split)
+  douane_amr_ref?: string;
+  douane_date?: string;
+  /** @deprecated use douane_amr_ref + douane_date */
   instructions_douane?: string;
+  // FACTURE (split)
   facture_no?: string;
+  shipping_line_inv?: string;
   arrival_notice_sent?: boolean;
+  arrival_notice_date?: string;
   cpu_scr?: string;
   ata?: string;
+  // T1 (split)
+  t1_no?: string;
+  t1_date?: string;
+  /** @deprecated use t1_no + t1_date */
   t1_ima?: string;
   hawb_no?: string;
+  // Job type
+  job_type?: string;
+  // Documents uploaded by shipper
+  documents?: Array<{ name: string; path: string; size: number }>;
   // Milestone ticks
   booking_released?: boolean;
   container_lifted?: boolean;

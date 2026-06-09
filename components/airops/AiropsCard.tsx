@@ -4,6 +4,49 @@ import React from "react";
 import { cn } from "@/lib/utils";
 import type { AiropsJob, AiropsJobData } from "@/lib/types/airops";
 
+// ─── Cutoff helpers ───────────────────────────────────────────────────────────
+
+const CUTOFF_LABELS: { key: "port_cutoff" | "si_cutoff" | "docs_cutoff" | "vgm_cutoff" | "cargo_handover_cutoff"; abbr: string }[] = [
+  { key: "port_cutoff",             abbr: "Port" },
+  { key: "si_cutoff",               abbr: "SI" },
+  { key: "docs_cutoff",             abbr: "Docs" },
+  { key: "vgm_cutoff",              abbr: "VGM" },
+  { key: "cargo_handover_cutoff",   abbr: "Cargo" },
+];
+
+const H48 = 48 * 60 * 60 * 1000;
+const D7  = 7  * 24 * 60 * 60 * 1000;
+
+interface CutoffAlert {
+  abbr: string;
+  isOverdue: boolean;
+}
+
+function getNearestCutoffAlert(job: AiropsJob): CutoffAlert | null {
+  const vessel = job.container?.vessel;
+  if (!vessel) return null;
+
+  const now = Date.now();
+  let nearest: { abbr: string; isOverdue: boolean; delta: number } | null = null;
+
+  for (const { key, abbr } of CUTOFF_LABELS) {
+    const raw = vessel[key];
+    if (!raw) continue;
+    const t = new Date(raw).getTime();
+    const delta = t - now; // negative = past
+    if (delta > H48) continue; // more than 48h away, skip
+    if (delta < -D7) continue; // more than 7 days past, skip
+    const isOverdue = delta < 0;
+    const absDelta = Math.abs(delta);
+    if (!nearest || absDelta < nearest.delta) {
+      nearest = { abbr, isOverdue, delta: absDelta };
+    }
+  }
+
+  if (!nearest) return null;
+  return { abbr: nearest.abbr, isOverdue: nearest.isOverdue };
+}
+
 interface AiropsCardProps {
   job: AiropsJob;
   isSelected: boolean;
@@ -30,6 +73,7 @@ export function AiropsCard({ job, isSelected, statusColor, onSelect, onDragStart
   const etd = d.etd ?? d.current_etd ?? job.container?.vessel?.etd;
   const containerNo = job.container?.container_number ?? null;
   const hasContainerNoVessel = !!containerNo && !vesselName;
+  const cutoffAlert = getNearestCutoffAlert(job);
 
   const activeMilestones = MILESTONE_KEYS.filter((m) => !!d[m.key]);
 
@@ -152,6 +196,40 @@ export function AiropsCard({ job, isSelected, statusColor, onSelect, onDragStart
           </div>
         )}
       </div>
+
+      {/* Cutoff warning strip */}
+      {cutoffAlert && (
+        <div
+          className="flex items-center gap-1 px-2.5 py-1"
+          style={{
+            background: cutoffAlert.isOverdue ? "#fef2f2" : "#fffbeb",
+            borderTop: `1px solid ${cutoffAlert.isOverdue ? "#fecaca" : "#fde68a"}`,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              padding: "1px 6px",
+              borderRadius: 20,
+              background: cutoffAlert.isOverdue ? "#ef4444" : "#f59e0b",
+              color: "#fff",
+            }}
+          >
+            {cutoffAlert.isOverdue ? "OVERDUE" : "DUE SOON"}
+          </span>
+          <span
+            style={{
+              fontSize: 10,
+              color: cutoffAlert.isOverdue ? "#b91c1c" : "#92400e",
+              fontWeight: 500,
+            }}
+          >
+            {cutoffAlert.abbr} cutoff
+          </span>
+        </div>
+      )}
     </div>
   );
 }

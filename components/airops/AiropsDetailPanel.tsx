@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState, useCallback, KeyboardEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAiropsStore } from "@/lib/stores/airops-store";
-import { useAiropsJob, useAiropsComments, useUpdateJob, useAddAiropsComment } from "@/lib/queries/airops";
+import { useAiropsJob, useAiropsComments, useUpdateJob, useAddAiropsComment, useAiropsStatuses } from "@/lib/queries/airops";
 import type { AiropsJobData } from "@/lib/types/airops";
+import { StuffingEmailModal } from "./StuffingEmailModal";
 
 // ─── SVG Icons ────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,93 @@ function formatDate(dateStr?: string): string {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
+function formatDateTime(dateStr: string): string {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) +
+    " " + d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+}
+
+// ─── Cutoff Banner ────────────────────────────────────────────────────────────
+
+const VESSEL_CUTOFFS: { key: "port_cutoff" | "si_cutoff" | "docs_cutoff" | "vgm_cutoff" | "cargo_handover_cutoff"; label: string }[] = [
+  { key: "port_cutoff",           label: "Port Cutoff" },
+  { key: "si_cutoff",             label: "SI Cutoff" },
+  { key: "docs_cutoff",           label: "Docs Cutoff" },
+  { key: "vgm_cutoff",            label: "VGM Cutoff" },
+  { key: "cargo_handover_cutoff", label: "Cargo Handover" },
+];
+
+type CutoffStatus = "overdue" | "today" | "tomorrow" | "ok";
+
+function getCutoffStatus(dateStr: string): CutoffStatus {
+  const now = new Date();
+  const t = new Date(dateStr);
+  if (isNaN(t.getTime())) return "ok";
+  const diffMs = t.getTime() - now.getTime();
+  if (diffMs < 0) return "overdue";
+  const diffH = diffMs / 3_600_000;
+  if (diffH <= 24) return "today";
+  if (diffH <= 48) return "tomorrow";
+  return "ok";
+}
+
+const CUTOFF_STATUS_STYLES: Record<CutoffStatus, { bg: string; color: string; border: string; label: string }> = {
+  overdue:  { bg: "#fef2f2", color: "#b91c1c", border: "#fecaca", label: "Overdue" },
+  today:    { bg: "#fff7ed", color: "#c2410c", border: "#fed7aa", label: "Today" },
+  tomorrow: { bg: "#fffbeb", color: "#92400e", border: "#fde68a", label: "Tomorrow" },
+  ok:       { bg: "#f0fdf4", color: "#15803d", border: "#bbf7d0", label: "OK" },
+};
+
+import type { AiropsVessel } from "@/lib/types/airops";
+
+function CutoffBanner({ vessel }: { vessel: AiropsVessel }) {
+  const rows = VESSEL_CUTOFFS
+    .map(({ key, label }) => ({ label, value: vessel[key] }))
+    .filter((r): r is { label: string; value: string } => typeof r.value === "string" && r.value.length > 0);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+      <span style={{ fontSize: 11, color: "var(--text-3)", fontWeight: 500, display: "block", marginBottom: 6, paddingLeft: 2 }}>
+        CUTOFF REMINDERS
+      </span>
+      <div className="flex flex-col gap-1">
+        {rows.map(({ label, value }) => {
+          const status = getCutoffStatus(value);
+          const s = CUTOFF_STATUS_STYLES[status];
+          return (
+            <div
+              key={label}
+              className="flex items-center justify-between px-2.5 py-1.5 rounded-lg"
+              style={{ background: s.bg, border: `1px solid ${s.border}` }}
+            >
+              <div className="flex items-center gap-2">
+                <span style={{ fontSize: 12, color: s.color, fontWeight: 500 }}>{label}</span>
+                <span style={{ fontSize: 11.5, color: s.color }}>{formatDateTime(value)}</span>
+              </div>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  padding: "1px 7px",
+                  borderRadius: 20,
+                  background: s.color,
+                  color: "#fff",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                {s.label.toUpperCase()}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── Accordion Section ────────────────────────────────────────────────────────
 
 function Section({ title, children, defaultOpen = true }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
@@ -99,6 +187,92 @@ function Section({ title, children, defaultOpen = true }: { title: string; child
         </span>
       </button>
       {open && <div className="px-4 pb-3 pt-0.5">{children}</div>}
+    </div>
+  );
+}
+
+// ─── Job Type Field ───────────────────────────────────────────────────────────
+
+const JOB_TYPE_OPTIONS = [
+  { value: "cc",      label: "CC",      full: "Custom Clearance" },
+  { value: "ff",      label: "FF",      full: "Freight Forwarding" },
+  { value: "x_works", label: "X Works", full: "Ex-Works" },
+];
+
+function JobTypeField({ value, onSave }: { value?: string | null; onSave: (v: string) => void }) {
+  return (
+    <div className="px-2 py-1.5">
+      <span style={{ fontSize: 11, color: "var(--text-3)", fontWeight: 500, lineHeight: 1, display: "block", marginBottom: 4 }}>Job Type</span>
+      <select
+        value={value ?? ""}
+        onChange={(e) => { if (e.target.value) onSave(e.target.value); }}
+        style={{
+          width: "100%",
+          height: 30,
+          borderRadius: 6,
+          padding: "0 8px",
+          fontSize: 13,
+          background: "var(--surface-2)",
+          border: "1px solid var(--border)",
+          color: value ? "var(--text)" : "var(--text-3)",
+          outline: "none",
+        }}
+      >
+        <option value="" disabled>Select…</option>
+        {JOB_TYPE_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label} – {opt.full}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// ─── Document Row ─────────────────────────────────────────────────────────────
+
+function DocumentRow({ doc, jobId }: { doc: { name: string; path: string; size: number }; jobId: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
+
+  async function open() {
+    if (fetching) return;
+    setFetching(true);
+    try {
+      const { createClient } = await import("@/lib/supabase/client");
+      const sb = createClient();
+      const { data } = await sb.storage.from("job-documents").createSignedUrl(doc.path, 300);
+      if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+    } finally {
+      setFetching(false);
+    }
+  }
+
+  const ext = doc.name.split(".").pop()?.toUpperCase() ?? "FILE";
+  const sizeMB = (doc.size / 1024 / 1024).toFixed(1);
+
+  return (
+    <div
+      className="flex items-center justify-between py-1.5 px-1 rounded-lg"
+      style={{ border: "1px solid var(--border)", background: "var(--surface-2)", marginBottom: 2 }}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <span style={{
+          fontSize: 10, fontWeight: 700, padding: "1px 5px", borderRadius: 4,
+          background: "#eef2ff", color: "#6366f1", border: "1px solid #c7d2fe", flexShrink: 0,
+        }}>{ext}</span>
+        <span className="text-xs truncate" style={{ color: "var(--text-2)" }}>{doc.name}</span>
+        <span className="text-xs shrink-0" style={{ color: "var(--text-3)" }}>{sizeMB} MB</span>
+      </div>
+      <button
+        onClick={open}
+        disabled={fetching}
+        style={{
+          fontSize: 11, fontWeight: 500, padding: "2px 10px", borderRadius: 5, flexShrink: 0,
+          background: fetching ? "var(--surface-2)" : "#eef2ff", color: "#4f46e5",
+          border: "1px solid #c7d2fe", cursor: "pointer",
+        }}
+      >
+        {fetching ? "…" : "Open"}
+      </button>
     </div>
   );
 }
@@ -384,8 +558,30 @@ export function AiropsDetailPanel() {
   const { selectedJobId, isPanelOpen, closePanel } = useAiropsStore();
   const { data: job, isLoading } = useAiropsJob(selectedJobId);
   const { data: comments = [] } = useAiropsComments(selectedJobId);
+  const { data: statuses = [] } = useAiropsStatuses();
   const updateJob = useUpdateJob();
   const addComment = useAddAiropsComment();
+
+  // Resolve status IDs by name for CSD actions
+  const statusByName = Object.fromEntries(statuses.map((s) => [s.name, s.id]));
+  const isConsigneeApproval = job?.status?.name === "Consignee Approval";
+
+  function approveJob() {
+    if (!job) return;
+    const nextId = statusByName["Container Planning"];
+    if (!nextId) return;
+    updateJob.mutate({ id: job.id, updates: { status_id: nextId } });
+  }
+
+  function rejectJob() {
+    if (!job) return;
+    const nextId = statusByName["Booking Request"];
+    if (!nextId) return;
+    updateJob.mutate({ id: job.id, updates: { status_id: nextId } });
+  }
+
+  const isStuffingFinalisation = job?.status?.name === "Stuffing Finalisation";
+  const [showStuffingEmail, setShowStuffingEmail] = useState(false);
 
   const [commentText, setCommentText] = useState("");
   const [consoleEditMode, setConsoleEditMode] = useState(false);
@@ -521,6 +717,70 @@ export function AiropsDetailPanel() {
                     {job.container.vessel.name}
                   </span>
                 )}
+                {/* CSD Approve / Reject — shown only when in Consignee Approval */}
+                {isConsigneeApproval && (
+                  <div className="flex gap-1.5 mt-1.5">
+                    <button
+                      onClick={approveJob}
+                      disabled={updateJob.isPending}
+                      style={{
+                        padding: "3px 12px",
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        background: "#16a34a",
+                        color: "#fff",
+                        border: "none",
+                        cursor: "pointer",
+                        opacity: updateJob.isPending ? 0.6 : 1,
+                      }}
+                    >
+                      ✓ Approve
+                    </button>
+                    <button
+                      onClick={rejectJob}
+                      disabled={updateJob.isPending}
+                      style={{
+                        padding: "3px 12px",
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        background: "#ef4444",
+                        color: "#fff",
+                        border: "none",
+                        cursor: "pointer",
+                        opacity: updateJob.isPending ? 0.6 : 1,
+                      }}
+                    >
+                      ✕ Reject
+                    </button>
+                  </div>
+                )}
+                {/* Stuffing Finalisation — Email Consignee */}
+                {isStuffingFinalisation && (
+                  <div className="mt-2">
+                    <button
+                      onClick={() => setShowStuffingEmail(true)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "5px 14px",
+                        borderRadius: 7,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        background: "#4f46e5",
+                        color: "#fff",
+                        border: "none",
+                        cursor: "pointer",
+                        boxShadow: "0 1px 4px rgba(79,70,229,0.25)",
+                        letterSpacing: "0.01em",
+                      }}
+                    >
+                      🔒 Finalise &amp; Email Consignee
+                    </button>
+                  </div>
+                )}
               </div>
               <button
                 onClick={closePanel}
@@ -559,6 +819,7 @@ export function AiropsDetailPanel() {
                   <FieldGrid>
                     <EditableField label="Consignee" value={d.consignee_name} onSave={(v) => saveData("consignee_name", v)} />
                     <EditableField label="Shipper" value={d.shipper_name} onSave={(v) => saveData("shipper_name", v)} />
+                    <JobTypeField value={d.job_type} onSave={(v) => saveData("job_type", v)} />
                     <EditableField label="Qty (pcs)" value={d.quantity_pcs} type="number" onSave={(v) => saveData("quantity_pcs", parseFloat(v) || 0)} />
                     <EditableField label="Volume (CBM)" value={d.volume} type="number" onSave={(v) => saveData("volume", parseFloat(v) || 0)} />
                     <EditableField label="No. of Cartons" value={d.no_of_cartons} type="number" onSave={(v) => saveData("no_of_cartons", parseInt(v) || 0)} />
@@ -615,6 +876,7 @@ export function AiropsDetailPanel() {
                     <EditableField label="Current ETD" value={d.current_etd} type="date" onSave={(v) => saveData("current_etd", v)} redIfPast />
                     <EditableField label="DO ETD" value={d.do_etd} type="date" onSave={(v) => saveData("do_etd", v)} />
                   </FieldGrid>
+                  {job.container?.vessel && <CutoffBanner vessel={job.container.vessel} />}
                 </Section>
 
                 {/* 3. Container Info */}
@@ -748,17 +1010,43 @@ export function AiropsDetailPanel() {
                     <EditableField label="RDV Date" value={d.rdv_date} type="date" onSave={(v) => saveData("rdv_date", v)} />
                     <EditableField label="ATA" value={d.ata} type="date" onSave={(v) => saveData("ata", v)} />
                     <EditableField label="CPU / SCR" value={d.cpu_scr} onSave={(v) => saveData("cpu_scr", v)} />
-                    <EditableField label="T1 / IMA" value={d.t1_ima} onSave={(v) => saveData("t1_ima", v)} />
                     <EditableField label="HAWB No." value={d.hawb_no} onSave={(v) => saveData("hawb_no", v)} />
-                    <EditableField label="Facture No." value={d.facture_no} onSave={(v) => saveData("facture_no", v)} />
+                    {/* T1 split into number + date */}
+                    <EditableField label="T1 No." value={d.t1_no} onSave={(v) => saveData("t1_no", v)} />
+                    <EditableField label="T1 Date" value={d.t1_date} type="date" onSave={(v) => saveData("t1_date", v)} />
+                    {/* FACTURE split: client invoice vs shipping line */}
+                    <EditableField label="Facture (Client Inv.)" value={d.facture_no} onSave={(v) => saveData("facture_no", v)} />
+                    <EditableField label="Shipping Line Inv." value={d.shipping_line_inv} onSave={(v) => saveData("shipping_line_inv", v)} />
                   </FieldGrid>
                   <FieldFull>
                     <EditableField label="Container Release Info" value={d.container_release_info} onSave={(v) => saveData("container_release_info", v)} />
-                    <EditableField label="Instructions Douane" value={d.instructions_douane} onSave={(v) => saveData("instructions_douane", v)} />
                   </FieldFull>
-                  <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }} className="flex flex-col gap-0.5">
-                    <ToggleSwitch label="ODT Sent" checked={!!d.odt_sent} onChange={(v) => saveData("odt_sent", v)} />
-                    <ToggleSwitch label="Arrival Notice Sent" checked={!!d.arrival_notice_sent} onChange={(v) => saveData("arrival_notice_sent", v)} />
+                  {/* Instructions Douane — AMR ref + date */}
+                  <div style={{ borderTop: "1px solid var(--border)", marginTop: 6, paddingTop: 6 }}>
+                    <span style={{ fontSize: 11, color: "var(--text-3)", fontWeight: 500, padding: "0 8px", display: "block", marginBottom: 2 }}>Instructions Douane</span>
+                    <FieldGrid>
+                      <EditableField label="AMR Ref" value={d.douane_amr_ref} placeholder="e.g. AMR 18/05" onSave={(v) => saveData("douane_amr_ref", v)} />
+                      <EditableField label="Douane Date" value={d.douane_date} type="date" onSave={(v) => saveData("douane_date", v)} />
+                    </FieldGrid>
+                  </div>
+                  {/* ODT + Arrival Notice — toggle + date side by side */}
+                  <div style={{ borderTop: "1px solid var(--border)", marginTop: 6, paddingTop: 6 }} className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <div style={{ flex: 1 }}>
+                        <ToggleSwitch label="ODT Sent" checked={!!d.odt_sent} onChange={(v) => saveData("odt_sent", v)} />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <EditableField label="ODT Date" value={d.odt_date} type="date" onSave={(v) => saveData("odt_date", v)} />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div style={{ flex: 1 }}>
+                        <ToggleSwitch label="Arrival Notice Sent" checked={!!d.arrival_notice_sent} onChange={(v) => saveData("arrival_notice_sent", v)} />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <EditableField label="Notice Date" value={d.arrival_notice_date} type="date" onSave={(v) => saveData("arrival_notice_date", v)} />
+                      </div>
+                    </div>
                   </div>
                 </Section>
 
@@ -775,7 +1063,18 @@ export function AiropsDetailPanel() {
                   </div>
                 </Section>
 
-                {/* 9. Comments */}
+                {/* 9. Shipper Documents */}
+                {d.documents && d.documents.length > 0 && (
+                  <Section title="Shipper Documents">
+                    <div className="flex flex-col gap-1 px-2">
+                      {d.documents.map((doc) => (
+                        <DocumentRow key={doc.path} doc={doc} jobId={job.id} />
+                      ))}
+                    </div>
+                  </Section>
+                )}
+
+                {/* 10. Comments */}
                 <Section title="Comments">
                   <div className="flex flex-col gap-2 mb-3" style={{ maxHeight: 280, overflowY: "auto" }}>
                     {comments.length === 0 && (
@@ -897,6 +1196,10 @@ export function AiropsDetailPanel() {
             )}
           </motion.div>
         </>
+      )}
+      {/* Stuffing Email Modal — rendered outside panel so z-index stacks correctly */}
+      {showStuffingEmail && job && (
+        <StuffingEmailModal job={job} onClose={() => setShowStuffingEmail(false)} />
       )}
     </AnimatePresence>
   );
