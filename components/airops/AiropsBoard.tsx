@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -14,7 +14,13 @@ import { AiropsColumn } from "@/components/airops/AiropsColumn";
 import { AiropsDetailPanel } from "@/components/airops/AiropsDetailPanel";
 import { ConsigneeApprovalBell } from "@/components/airops/ConsigneeApprovalBell";
 import { createClient } from "@/lib/supabase/client";
-import type { AiropsFilters, AiropsJob } from "@/lib/types/airops";
+import type { AiropsFilters, AiropsJob, AiropsStatus } from "@/lib/types/airops";
+import {
+  useAllRequiredFields,
+  useAutoProgressionRules,
+  writeAuditLog,
+} from "@/lib/queries/airops-admin";
+import type { AiropsColumnRequiredField, AiropsAutoProgression } from "@/lib/types/airops-admin";
 
 type ViewMode = "board" | "sheets";
 type SortDir = "asc" | "desc" | null;
@@ -293,6 +299,70 @@ const TEAM_COLORS: Record<TeamView, { bg: string; color: string; border: string 
   france: { bg: "#fdf4ff", color: "#9333ea",       border: "#e9d5ff" },
 };
 
+// ─── Admin enforcement helpers ────────────────────────────────────────────────
+
+/** Returns false when v is null/undefined or the string is "", "null", or "0". */
+function present(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (typeof v === "boolean") return v;
+  if (Array.isArray(v)) return v.length > 0;
+  const s = String(v).trim();
+  return s !== "" && s !== "null" && s !== "0";
+}
+
+/**
+ * Given a job, the full list of required-field records and all statuses,
+ * return any field keys that are missing for the target status.
+ * Returns [] when no rules configured (allow move).
+ */
+function getMissingFields(
+  job: AiropsJob,
+  targetStatusId: string,
+  requiredFields: AiropsColumnRequiredField[]
+): string[] {
+  const rules = requiredFields.filter((r) => r.status_id === targetStatusId);
+  if (rules.length === 0) return [];
+  return rules
+    .filter((r) => !present((job.data as Record<string, unknown>)[r.field_key]))
+    .map((r) => r.field_key);
+}
+
+/**
+ * Given the updated job data and auto-progression rules, find the target
+ * status with the highest display_order that:
+ *  - has its trigger_field now present in jobData
+ *  - is strictly AHEAD (higher display_order) of the job's current status
+ * Returns null when no rule applies.
+ */
+function findAutoProgressionTarget(
+  job: AiropsJob,
+  jobData: Record<string, unknown>,
+  rules: AiropsAutoProgression[],
+  statuses: AiropsStatus[]
+): AiropsStatus | null {
+  if (rules.length === 0) return null;
+
+  const currentStatus = statuses.find((s) => s.id === job.status_id);
+  const currentOrder = currentStatus?.display_order ?? -1;
+
+  // Collect candidate targets: rule fires when trigger_field is present
+  const candidates: AiropsStatus[] = [];
+  for (const rule of rules) {
+    if (!present(jobData[rule.trigger_field])) continue;
+    const target = statuses.find((s) => s.id === rule.target_status_id);
+    if (!target) continue;
+    // Only allow forward progression
+    if (target.display_order <= currentOrder) continue;
+    candidates.push(target);
+  }
+
+  if (candidates.length === 0) return null;
+  // Choose the one with the highest display_order among candidates
+  return candidates.reduce((best, s) =>
+    s.display_order > best.display_order ? s : best
+  );
+}
+
 // ─── Board ────────────────────────────────────────────────────────────────────
 
 export function AiropsBoard() {
@@ -307,10 +377,11 @@ export function AiropsBoard() {
   const [userTeam, setUserTeam] = useState<string>("");
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
-
+  const [actorEmail, setActorEmail] = useState<string>("");
 
   useEffect(() => {
     createClient().auth.getUser().then(({ data }) => {
+      if (data.user?.email) setActorEmail(data.user.email);
       const t = data.user?.user_metadata?.team;
       if (t === "pol" || t === "france") {
         setTeamView(t);
@@ -327,6 +398,10 @@ export function AiropsBoard() {
   const { data: jobs = [], isLoading: jobsLoading } = useAiropsJobs(filters);
   const { data: vessels = [] } = useAiropsVessels();
   const updateJob = useUpdateJob();
+
+  // ── Admin enforcement ──────────────────────────────────────────────────────
+  const { data: requiredFields = [] } = useAllRequiredFields();
+  const { data: autoRules = [] } = useAutoProgressionRules();
 
   const uniquePods = useMemo(() => {
     const pods = vessels.map((v) => v.pod).filter((p): p is string => !!p);
@@ -354,13 +429,93 @@ export function AiropsBoard() {
     ? statuses.filter((s) => s.display_order > 15)
     : statuses;
 
-  function handleDrop(jobId: string, newStatusId: string, newOrder: number) {
-    updateJob.mutate({ id: jobId, updates: { status_id: newStatusId, column_order: newOrder } });
-  }
+  // ── Required-field gate + audit-logged drop ──────────────────────────────
+  const handleDrop = useCallback(
+    (jobId: string, newStatusId: string, newOrder: number) => {
+      const job = jobs.find((j) => j.id === jobId);
+      // If same column, just reorder — no gate needed
+      if (!job || job.status_id === newStatusId) {
+        updateJob.mutate({ id: jobId, updates: { status_id: newStatusId, column_order: newOrder } });
+        return;
+      }
 
-  function handleSaveCell(jobId: string, key: string, val: string | number | boolean) {
-    updateJob.mutate({ id: jobId, updates: { data: { [key]: val } } });
-  }
+      // Required-field gate (soft — user can override)
+      if (requiredFields.length > 0) {
+        const missing = getMissingFields(job, newStatusId, requiredFields);
+        if (missing.length > 0) {
+          const targetName = statuses.find((s) => s.id === newStatusId)?.name ?? newStatusId;
+          const confirmed = window.confirm(
+            `Moving to "${targetName}" but the following required fields are missing:\n\n• ${missing.join("\n• ")}\n\nMove anyway?`
+          );
+          if (!confirmed) return;
+        }
+      }
+
+      updateJob.mutate(
+        { id: jobId, updates: { status_id: newStatusId, column_order: newOrder } },
+        {
+          onSuccess: () => {
+            if (actorEmail) {
+              const fromName = statuses.find((s) => s.id === job.status_id)?.name ?? job.status_id ?? "unknown";
+              const toName = statuses.find((s) => s.id === newStatusId)?.name ?? newStatusId;
+              writeAuditLog({
+                actor_email: actorEmail,
+                action: "job_moved",
+                target_type: "job",
+                target_id: jobId,
+                detail: { from_status: fromName, to_status: toName, order_no: job.data.order_no },
+              });
+            }
+          },
+        }
+      );
+    },
+    [jobs, statuses, requiredFields, updateJob, actorEmail]
+  );
+
+  // ── Save cell with auto-progression check ────────────────────────────────
+  const handleSaveCell = useCallback(
+    (jobId: string, key: string, val: string | number | boolean) => {
+      const job = jobs.find((j) => j.id === jobId);
+      updateJob.mutate(
+        { id: jobId, updates: { data: { [key]: val } } },
+        {
+          onSuccess: (updatedRaw) => {
+            // Auto-progression: evaluate rules on updated data
+            if (autoRules.length === 0) return;
+            const updated = updatedRaw as AiropsJob | undefined;
+            const jobData = updated
+              ? (updated.data as Record<string, unknown>)
+              : { ...(job?.data ?? {}), [key]: val };
+            const baseJob = updated ?? job;
+            if (!baseJob) return;
+
+            const target = findAutoProgressionTarget(baseJob, jobData, autoRules, statuses);
+            if (!target) return;
+
+            // Move to target (no gate — auto progression bypasses required-field gate)
+            updateJob.mutate(
+              { id: jobId, updates: { status_id: target.id } },
+              {
+                onSuccess: () => {
+                  if (actorEmail) {
+                    writeAuditLog({
+                      actor_email: actorEmail,
+                      action: "auto_progression",
+                      target_type: "job",
+                      target_id: jobId,
+                      detail: { trigger_field: key, to_status: target.name, order_no: job?.data.order_no },
+                    });
+                  }
+                },
+              }
+            );
+          },
+        }
+      );
+    },
+    [jobs, statuses, autoRules, updateJob, actorEmail]
+  );
 
   const isLoading = statusLoading || jobsLoading;
 

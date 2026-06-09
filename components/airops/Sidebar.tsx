@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { ConsigneeApprovalBell } from "@/components/airops/ConsigneeApprovalBell";
 import { useAiropsStore } from "@/lib/stores/airops-store";
+import { useIsAdmin } from "@/lib/queries/airops-admin";
 
 const NAV = [
   {
@@ -97,6 +98,7 @@ export function Sidebar({ userEmail, team }: { userEmail: string; team?: string 
 
   const tc = team && team in TEAM_CONFIG ? TEAM_CONFIG[team as keyof typeof TEAM_CONFIG] : null;
   const { globalSearch, setGlobalSearch } = useAiropsStore();
+  const isAdmin = useIsAdmin();
 
   return (
     <aside
@@ -203,6 +205,26 @@ export function Sidebar({ userEmail, team }: { userEmail: string; team?: string 
             </Link>
           );
         })}
+
+        {/* Admin — only for admins/superadmins */}
+        {isAdmin && (
+          <Link
+            href="/airops/admin"
+            className="flex items-center gap-2.5 h-9 px-2.5 rounded-lg transition-colors"
+            style={{
+              background: pathname.startsWith("/airops/admin") ? "#eef2ff" : "transparent",
+              color: pathname.startsWith("/airops/admin") ? "#6366f1" : "var(--text-3)",
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+              <path d="M12 2 4 5v6c0 5 3.5 8.5 8 11 4.5-2.5 8-6 8-11V5z" />
+              <path d="m9 12 2 2 4-4" />
+            </svg>
+            <span className="text-sm font-medium whitespace-nowrap opacity-0 group-hover/nav:opacity-100 transition-opacity duration-150 delay-75">
+              Admin
+            </span>
+          </Link>
+        )}
       </nav>
 
       {/* Sign out */}
