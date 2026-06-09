@@ -18,7 +18,18 @@ export default function LoginPage() {
     const sb = createClient();
     const { error: err } = await sb.auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (err) { setError(err.message); return; }
+    if (err) {
+      // Supabase returns "Email not confirmed" even when confirmation is disabled
+      // for users created while it was enabled — surface a cleaner message
+      if (err.message.toLowerCase().includes("email not confirmed")) {
+        setError("Your account needs to be confirmed. Contact your admin or try signing up again.");
+      } else if (err.message.toLowerCase().includes("invalid login credentials")) {
+        setError("Incorrect email or password.");
+      } else {
+        setError(err.message);
+      }
+      return;
+    }
     router.push("/airops/board");
     router.refresh();
   }

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 export default function SignupPage() {
@@ -10,8 +11,8 @@ export default function SignupPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
+  const router = useRouter();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -20,40 +21,42 @@ export default function SignupPage() {
     if (password !== confirmPassword) { setError("Passwords do not match"); return; }
     if (password.length < 6) { setError("Password min 6 characters"); return; }
     setLoading(true);
+
     const sb = createClient();
-    const { error: err } = await sb.auth.signUp({
+
+    // Sign up — email confirmation is OFF so session comes back immediately
+    const { data: signUpData, error: signUpErr } = await sb.auth.signUp({
       email,
       password,
       options: { data: { team } },
     });
-    setLoading(false);
-    if (err) { setError(err.message); return; }
-    setSuccess(true);
-  }
 
-  if (success) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--background)" }}>
-        <div className="w-full max-w-sm rounded-xl p-8 text-center" style={{ background: "var(--surface)", border: "1px solid var(--border)" }}>
-          <div className="w-10 h-10 rounded-full flex items-center justify-center mx-auto mb-4" style={{ background: "#dcfce7" }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16a34a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-          </div>
-          <h2 className="text-lg font-semibold mb-2" style={{ color: "var(--text)" }}>Account created</h2>
-          <p className="text-sm mb-6" style={{ color: "var(--text-3)" }}>
-            Check your email for a confirmation link, then sign in.
-          </p>
-          <Link
-            href="/login"
-            className="flex items-center justify-center w-full h-9 rounded-lg text-sm font-medium text-white"
-            style={{ background: "#6366f1" }}
-          >
-            Go to sign in
-          </Link>
-        </div>
-      </div>
-    );
+    if (signUpErr) {
+      setLoading(false);
+      setError(signUpErr.message);
+      return;
+    }
+
+    // If we already have a session (email confirmation off), go straight to board
+    if (signUpData.session) {
+      router.push("/airops/board");
+      router.refresh();
+      return;
+    }
+
+    // No session yet — sign in explicitly (handles edge cases / existing unconfirmed users)
+    const { error: signInErr } = await sb.auth.signInWithPassword({ email, password });
+    setLoading(false);
+
+    if (signInErr) {
+      // Sign-up worked but sign-in failed — send them to login with a helpful message
+      setError("Account created — please sign in below.");
+      router.push("/login");
+      return;
+    }
+
+    router.push("/airops/board");
+    router.refresh();
   }
 
   return (
