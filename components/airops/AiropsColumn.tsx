@@ -10,6 +10,7 @@ interface AiropsColumnProps {
   selectedId: string | null;
   onSelectCard: (id: string) => void;
   onDrop: (jobId: string, newStatusId: string, newOrder: number) => void;
+  cardFields?: string[];
 }
 
 function DropIndicator({ beforeId, statusId }: { beforeId: string | null; statusId: string }) {
@@ -23,7 +24,7 @@ function DropIndicator({ beforeId, statusId }: { beforeId: string | null; status
   );
 }
 
-export function AiropsColumn({ status, jobs, selectedId, onSelectCard, onDrop }: AiropsColumnProps) {
+export function AiropsColumn({ status, jobs, selectedId, onSelectCard, onDrop, cardFields }: AiropsColumnProps) {
   const [active, setActive] = useState(false);
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -198,6 +199,7 @@ export function AiropsColumn({ status, jobs, selectedId, onSelectCard, onDrop }:
               statusColor={status.color_hex}
               onSelect={() => onSelectCard(job.id)}
               onDragStart={(e) => handleDragStart(e, job)}
+              cardFields={cardFields}
             />
           </React.Fragment>
         ))}

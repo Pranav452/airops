@@ -53,6 +53,7 @@ interface AiropsCardProps {
   statusColor: string;
   onSelect: () => void;
   onDragStart: (e: React.DragEvent) => void;
+  cardFields?: string[];
 }
 
 const MILESTONE_KEYS: { key: keyof AiropsJobData; label: string; color: string }[] = [
@@ -64,10 +65,15 @@ const MILESTONE_KEYS: { key: keyof AiropsJobData; label: string; color: string }
   { key: "billing_done",      label: "BLG", color: "#6366f1" },
 ];
 
-export function AiropsCard({ job, isSelected, statusColor, onSelect, onDragStart }: AiropsCardProps) {
+const DEFAULT_CARD_FIELDS = ["order_no", "consignee_name", "etd", "vessel_name", "volume"];
+
+export function AiropsCard({ job, isSelected, statusColor, onSelect, onDragStart, cardFields }: AiropsCardProps) {
   const d = job.data;
   const isFcr = (d.container_type ?? "").toUpperCase() === "FCR";
   const hexColor = `#${statusColor.replace(/^#/, "")}`;
+
+  const fields = cardFields ?? DEFAULT_CARD_FIELDS;
+  const show = (f: string) => fields.includes(f);
 
   const vesselName = d.vessel_name ?? job.container?.vessel?.name;
   const etd = d.etd ?? d.current_etd ?? job.container?.vessel?.etd;
@@ -133,18 +139,81 @@ export function AiropsCard({ job, isSelected, statusColor, onSelect, onDragStart
         </div>
 
         {/* Consignee name (title) */}
-        {d.consignee_name && (
+        {show("consignee_name") && d.consignee_name ? (
           <p className="text-[12.5px] font-semibold leading-snug line-clamp-1 mb-0.5" style={{ color: "var(--text)" }}>
             {d.consignee_name}
           </p>
-        )}
+        ) : null}
 
         {/* Shipper name */}
-        {d.shipper_name && (
+        {show("shipper_name") && d.shipper_name ? (
           <p className="text-[11px] leading-snug line-clamp-1 mb-1.5" style={{ color: "var(--text-3)" }}>
             {d.shipper_name}
           </p>
-        )}
+        ) : null}
+
+        {/* Job type */}
+        {show("job_type") && d.job_type ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            {d.job_type}
+          </p>
+        ) : null}
+
+        {/* Booking no */}
+        {show("booking_no") && d.booking_no ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            BKG: {d.booking_no}
+          </p>
+        ) : null}
+
+        {/* MBL number */}
+        {show("mbl_number") && d.mbl_number ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            MBL: {d.mbl_number}
+          </p>
+        ) : null}
+
+        {/* POL */}
+        {show("pol") && d.pol ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            POL: {d.pol}
+          </p>
+        ) : null}
+
+        {/* Console no */}
+        {show("console_no") && job.console_no ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            CNS: {job.console_no}
+          </p>
+        ) : null}
+
+        {/* Container numbers */}
+        {show("container_numbers") && d.container_numbers && d.container_numbers.length > 0 ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            CTN: {d.container_numbers.join(", ")}
+          </p>
+        ) : null}
+
+        {/* Volume */}
+        {show("volume") && d.volume != null ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            Vol: {d.volume} CBM
+          </p>
+        ) : null}
+
+        {/* Gross weight */}
+        {show("gross_weight") && d.gross_weight != null ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            GW: {d.gross_weight} kg
+          </p>
+        ) : null}
+
+        {/* ETA */}
+        {show("eta") && d.eta ? (
+          <p className="text-[10px] mb-1" style={{ color: "var(--text-3)" }}>
+            ETA {d.eta}
+          </p>
+        ) : null}
 
         {/* Container badge (when assigned but no vessel yet) */}
         {hasContainerNoVessel && (
@@ -162,23 +231,23 @@ export function AiropsCard({ job, isSelected, statusColor, onSelect, onDragStart
         )}
 
         {/* Vessel + ETD */}
-        {(vesselName || etd) && (
+        {(show("vessel_name") || show("etd")) && (vesselName || etd) ? (
           <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
-            {vesselName && (
+            {show("vessel_name") && vesselName ? (
               <span
                 className="text-[10px] font-medium px-1.5 py-0.5 rounded"
                 style={{ background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe" }}
               >
                 {vesselName}
               </span>
-            )}
-            {etd && (
+            ) : null}
+            {show("etd") && etd ? (
               <span className="text-[10px]" style={{ color: "var(--text-3)" }}>
                 ETD {etd}
               </span>
-            )}
+            ) : null}
           </div>
-        )}
+        ) : null}
 
         {/* Active milestone dots */}
         {activeMilestones.length > 0 && (

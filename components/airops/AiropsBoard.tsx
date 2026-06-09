@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useAiropsStatuses,
   useAiropsJobs,
@@ -11,119 +12,242 @@ import {
 import { useAiropsStore } from "@/lib/stores/airops-store";
 import { AiropsColumn } from "@/components/airops/AiropsColumn";
 import { AiropsDetailPanel } from "@/components/airops/AiropsDetailPanel";
+import { ConsigneeApprovalBell } from "@/components/airops/ConsigneeApprovalBell";
 import { createClient } from "@/lib/supabase/client";
 import type { AiropsFilters, AiropsJob } from "@/lib/types/airops";
 
 type ViewMode = "board" | "sheets";
-type SortDir = "asc" | "desc";
-
+type SortDir = "asc" | "desc" | null;
 type TeamView = "all" | "pol" | "france";
 
-// ─── Sheets columns ───────────────────────────────────────────────────────────
-const SHEET_COLS: { key: string; label: string; get: (j: AiropsJob) => string }[] = [
-  { key: "order_no",          label: "Order No",      get: (j) => j.data.order_no ?? "—" },
-  { key: "status",            label: "Status",        get: (j) => j.status?.name ?? "—" },
-  { key: "consignee_name",    label: "Consignee",     get: (j) => j.data.consignee_name ?? "—" },
-  { key: "shipper_name",      label: "Shipper",       get: (j) => j.data.shipper_name ?? "—" },
-  { key: "job_type",          label: "Job Type",      get: (j) => (j.data.job_type ?? "").toUpperCase() || "—" },
-  { key: "vessel",            label: "Vessel",        get: (j) => j.container?.vessel?.name ?? "—" },
-  { key: "etd",               label: "ETD",           get: (j) => j.data.etd ?? "—" },
-  { key: "eta",               label: "ETA",           get: (j) => j.data.eta ?? "—" },
-  { key: "container_numbers", label: "Container No",  get: (j) => (j.data.container_numbers ?? []).join(", ") || "—" },
-  { key: "volume",            label: "Vol (CBM)",     get: (j) => j.data.volume != null ? String(j.data.volume) : "—" },
-  { key: "gross_weight",      label: "Gross Wt",      get: (j) => j.data.gross_weight != null ? String(j.data.gross_weight) : "—" },
-  { key: "console_no",        label: "Console No",    get: (j) => j.console_no ?? "—" },
-  { key: "cross_verified",    label: "Verified",      get: (j) => j.cross_verified ? "✓" : "—" },
-  { key: "created_at",        label: "Created",       get: (j) => j.created_at?.slice(0, 10) ?? "—" },
+// ─── Bajaj-style Sheets spreadsheet ──────────────────────────────────────────
+
+interface SheetColDef {
+  key: string; label: string; defaultWidth: number;
+  type?: "text" | "number" | "date" | "boolean" | "status" | "readonly";
+  sticky?: boolean; dataKey?: string; jobKey?: string;
+}
+
+const SHEET_COLS: SheetColDef[] = [
+  { key: "order_no",            label: "Order No",       defaultWidth: 130, sticky: true, type: "readonly", dataKey: "order_no" },
+  { key: "status",              label: "Status",         defaultWidth: 160, type: "status" },
+  { key: "consignee_name",      label: "Consignee",      defaultWidth: 160, dataKey: "consignee_name" },
+  { key: "shipper_name",        label: "Shipper",        defaultWidth: 150, dataKey: "shipper_name" },
+  { key: "job_type",            label: "Job Type",       defaultWidth: 110, dataKey: "job_type" },
+  { key: "vessel",              label: "Vessel",         defaultWidth: 150, type: "readonly" },
+  { key: "etd",                 label: "ETD",            defaultWidth: 110, type: "date", dataKey: "etd" },
+  { key: "eta",                 label: "ETA",            defaultWidth: 110, type: "date", dataKey: "eta" },
+  { key: "booking_no",          label: "Booking No",     defaultWidth: 130, dataKey: "booking_no" },
+  { key: "container_numbers",   label: "Container No",   defaultWidth: 160, type: "readonly" },
+  { key: "mbl_number",          label: "MBL No",         defaultWidth: 130, dataKey: "mbl_number" },
+  { key: "hbl_number",          label: "HBL No",         defaultWidth: 130, dataKey: "hbl_number" },
+  { key: "sb_number",           label: "SB No",          defaultWidth: 110, dataKey: "sb_number" },
+  { key: "console_no",          label: "Console No",     defaultWidth: 120, type: "readonly", jobKey: "console_no" },
+  { key: "pol",                 label: "POL",            defaultWidth: 100, dataKey: "pol" },
+  { key: "volume",              label: "Vol (CBM)",      defaultWidth: 90,  type: "number", dataKey: "volume" },
+  { key: "gross_weight",        label: "Gross Wt",       defaultWidth: 90,  type: "number", dataKey: "gross_weight" },
+  { key: "net_weight",          label: "Net Wt",         defaultWidth: 90,  type: "number", dataKey: "net_weight" },
+  { key: "quantity_pcs",        label: "Qty (pcs)",      defaultWidth: 80,  type: "number", dataKey: "quantity_pcs" },
+  { key: "no_of_cartons",       label: "Cartons",        defaultWidth: 80,  type: "number", dataKey: "no_of_cartons" },
+  { key: "pkgs_cases",          label: "Pkgs/Cases",     defaultWidth: 100, dataKey: "pkgs_cases" },
+  { key: "cargo_handover_date", label: "Cargo Handover", defaultWidth: 130, type: "date",   dataKey: "cargo_handover_date" },
+  { key: "transporter",         label: "Transporter",    defaultWidth: 130, dataKey: "transporter" },
+  { key: "leo_date",            label: "LEO Date",       defaultWidth: 110, type: "date",   dataKey: "leo_date" },
+  { key: "gate_in_date",        label: "Gate In",        defaultWidth: 110, type: "date",   dataKey: "gate_in_date" },
+  { key: "bl_date",             label: "BL Date",        defaultWidth: 110, type: "date",   dataKey: "bl_date" },
+  { key: "invoice_number",      label: "Invoice No",     defaultWidth: 120, dataKey: "invoice_number" },
+  { key: "rdv_date",            label: "RDV Date",       defaultWidth: 110, type: "date",   dataKey: "rdv_date" },
+  { key: "ata",                 label: "ATA",            defaultWidth: 110, type: "date",   dataKey: "ata" },
+  { key: "cpu_scr",             label: "CPU/SCR",        defaultWidth: 110, dataKey: "cpu_scr" },
+  { key: "t1_no",               label: "T1 No",          defaultWidth: 100, dataKey: "t1_no" },
+  { key: "t1_date",             label: "T1 Date",        defaultWidth: 110, type: "date",   dataKey: "t1_date" },
+  { key: "cross_verified",      label: "Verified",       defaultWidth: 70,  type: "boolean", jobKey: "cross_verified" },
+  { key: "created_at",          label: "Created",        defaultWidth: 110, type: "readonly" },
 ];
 
-function SheetsView({ jobs, onSelectJob, selectedId, sortCol, setSortCol, sortDir, setSortDir }: {
+const ROW_NUM_W = 40;
+const EMPTY = <span style={{ color: "var(--text-3)" }}>—</span>;
+
+function ResizeHandle({ onResize }: { onResize: (dx: number) => void }) {
+  const startX = useRef<number>(0);
+  function onMouseDown(e: React.MouseEvent) {
+    e.preventDefault(); e.stopPropagation();
+    startX.current = e.clientX;
+    const onMove = (me: MouseEvent) => { onResize(me.clientX - startX.current); startX.current = me.clientX; };
+    const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+  return (
+    <div onMouseDown={onMouseDown} style={{ position: "absolute", right: 0, top: 0, height: "100%", width: 6, cursor: "col-resize", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ width: 1, height: 14, background: "var(--border)" }} />
+    </div>
+  );
+}
+
+function SheetCell({ col, job, isFocused, onFocus, onSave, onNavigate }: {
+  col: SheetColDef; job: AiropsJob; isFocused: boolean;
+  onFocus: () => void;
+  onSave: (key: string, val: string | number | boolean) => void;
+  onNavigate: (dir: "up" | "down" | "tab") => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
+
+  let raw: unknown = null;
+  if (col.jobKey) raw = (job as unknown as Record<string, unknown>)[col.jobKey!];
+  else if (col.dataKey) raw = (job.data as Record<string, unknown>)[col.dataKey];
+  else if (col.key === "vessel") raw = job.container?.vessel?.name ?? null;
+  else if (col.key === "container_numbers") raw = (job.data.container_numbers ?? []).join(", ") || null;
+  else if (col.key === "created_at") raw = job.created_at?.slice(0, 10) ?? null;
+
+  const display = raw != null && raw !== "" ? String(raw) : null;
+  const base: React.CSSProperties = { width: "100%", height: "100%", display: "flex", alignItems: "center", padding: "0 10px", fontSize: 12 };
+
+  if (col.type === "boolean") {
+    const on = raw === true || raw === 1 || raw === "true";
+    return (
+      <div style={{ ...base, justifyContent: "center", cursor: "pointer" }}
+        onClick={() => { onFocus(); onSave(col.jobKey ?? col.dataKey ?? col.key, !on); }}>
+        <span style={{ fontWeight: 700, color: on ? "#16a34a" : "var(--text-3)" }}>{on ? "✓" : "—"}</span>
+      </div>
+    );
+  }
+  if (col.type === "readonly") {
+    return <div style={{ ...base, color: display ? "var(--text)" : undefined }}>{display ?? EMPTY}</div>;
+  }
+
+  function commit() {
+    setEditing(false);
+    if (draft !== (display ?? "")) {
+      const key = col.dataKey ?? col.key;
+      onSave(key, col.type === "number" && draft !== "" ? Number(draft) : draft);
+    }
+  }
+
+  if (editing) {
+    return (
+      <input ref={inputRef} value={draft}
+        type={col.type === "number" ? "number" : col.type === "date" ? "date" : "text"}
+        style={{ width: "100%", height: "100%", padding: "0 10px", fontSize: 12, border: "none", outline: "none", background: "#fefce8", color: "var(--text)" }}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setEditing(false);
+          if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); onNavigate("down"); }
+          if (e.key === "Tab") { e.preventDefault(); (e.target as HTMLInputElement).blur(); onNavigate(e.shiftKey ? "up" : "tab"); }
+          if (e.key === "ArrowUp") { e.preventDefault(); (e.target as HTMLInputElement).blur(); onNavigate("up"); }
+          if (e.key === "ArrowDown") { e.preventDefault(); (e.target as HTMLInputElement).blur(); onNavigate("down"); }
+        }}
+      />
+    );
+  }
+  return (
+    <div style={{ ...base, cursor: "text", color: display ? "var(--text)" : undefined, userSelect: "none" }}
+      onClick={() => { onFocus(); setDraft(display ?? ""); setEditing(true); }}>
+      {display ?? EMPTY}
+    </div>
+  );
+}
+
+function SheetsView({ jobs, onSelectJob, selectedId, onSaveCell }: {
   jobs: AiropsJob[];
   onSelectJob: (id: string) => void;
   selectedId: string | null;
-  sortCol: string;
-  setSortCol: (c: string) => void;
-  sortDir: SortDir;
-  setSortDir: (d: SortDir) => void;
+  onSaveCell: (jobId: string, key: string, val: string | number | boolean) => void;
 }) {
+  const [sortKey, setSortKey] = useState("created_at");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [focusCell, setFocusCell] = useState<[number, number] | null>(null);
+  const [hovRow, setHovRow] = useState<number | null>(null);
+  const [widths, setWidths] = useState<number[]>(() => SHEET_COLS.map((c) => c.defaultWidth));
+
   const sorted = useMemo(() => {
+    if (!sortDir) return jobs;
     return [...jobs].sort((a, b) => {
-      const col = SHEET_COLS.find((c) => c.key === sortCol);
+      const col = SHEET_COLS.find((c) => c.key === sortKey);
       if (!col) return 0;
-      const av = col.get(a);
-      const bv = col.get(b);
-      return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      let av: unknown = null, bv: unknown = null;
+      if (col.jobKey) { av = (a as unknown as Record<string, unknown>)[col.jobKey!]; bv = (b as unknown as Record<string, unknown>)[col.jobKey!]; }
+      else if (col.dataKey) { av = (a.data as Record<string, unknown>)[col.dataKey]; bv = (b.data as Record<string, unknown>)[col.dataKey]; }
+      else if (col.key === "vessel") { av = a.container?.vessel?.name; bv = b.container?.vessel?.name; }
+      else if (col.key === "created_at") { av = a.created_at; bv = b.created_at; }
+      return (sortDir === "asc" ? 1 : -1) * String(av ?? "").localeCompare(String(bv ?? ""), undefined, { numeric: true });
     });
-  }, [jobs, sortCol, sortDir]);
+  }, [jobs, sortKey, sortDir]);
 
   function handleSort(key: string) {
-    if (sortCol === key) setSortDir(sortDir === "asc" ? "desc" : "asc");
-    else { setSortCol(key); setSortDir("asc"); }
+    if (sortKey === key) setSortDir((d) => d === "asc" ? "desc" : d === "desc" ? null : "asc");
+    else { setSortKey(key); setSortDir("asc"); }
   }
+
+  function resizeCol(i: number, dx: number) {
+    setWidths((prev) => { const n = [...prev]; n[i] = Math.max(50, n[i] + dx); return n; });
+  }
+
+  function handleNavigate(ri: number, ci: number, dir: "up" | "down" | "tab") {
+    let nr = ri;
+    if (dir === "down" || dir === "tab") nr = Math.min(sorted.length - 1, ri + 1);
+    else if (dir === "up") nr = Math.max(0, ri - 1);
+    setFocusCell([nr, ci]);
+  }
+
+  const stickyLeft = ROW_NUM_W;
+  const totalW = ROW_NUM_W + widths.reduce((a, b) => a + b, 0);
 
   return (
     <div className="flex-1 overflow-auto" style={{ background: "var(--background)" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <table style={{ borderCollapse: "collapse", tableLayout: "fixed", width: totalW }}>
+        <colgroup>
+          <col style={{ width: ROW_NUM_W }} />
+          {widths.map((w, i) => <col key={i} style={{ width: w }} />)}
+        </colgroup>
         <thead>
-          <tr style={{ background: "var(--surface)", position: "sticky", top: 0, zIndex: 10 }}>
-            {SHEET_COLS.map((c) => (
-              <th
-                key={c.key}
-                onClick={() => handleSort(c.key)}
-                style={{
-                  padding: "8px 12px", borderBottom: "1px solid var(--border)",
-                  textAlign: "left", whiteSpace: "nowrap", cursor: "pointer",
-                  color: sortCol === c.key ? "#6366f1" : "var(--text-2)",
-                  fontWeight: 600, fontSize: 11, letterSpacing: "0.03em", textTransform: "uppercase",
-                  userSelect: "none",
-                }}
-              >
-                {c.label}
-                {sortCol === c.key && (
-                  <span style={{ marginLeft: 4 }}>{sortDir === "asc" ? "↑" : "↓"}</span>
-                )}
-              </th>
-            ))}
+          <tr style={{ height: 34, background: "var(--surface)", position: "sticky", top: 0, zIndex: 20 }}>
+            <th style={{ width: ROW_NUM_W, position: "sticky", left: 0, zIndex: 30, background: "var(--surface)", borderBottom: "1px solid var(--border)", borderRight: "1px solid var(--border)" }} />
+            {SHEET_COLS.map((col, ci) => {
+              const active = sortKey === col.key && !!sortDir;
+              return (
+                <th key={col.key} style={{ position: "sticky", top: 0, left: col.sticky ? stickyLeft : undefined, zIndex: col.sticky ? 30 : 20, background: "var(--surface)", borderBottom: "1px solid var(--border)", borderRight: "1px solid var(--border)", padding: "0 10px", textAlign: "left", whiteSpace: "nowrap", userSelect: "none" }}>
+                  <button onClick={() => handleSort(col.key)} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: active ? "#6366f1" : "var(--text-2)", background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                    <span>{col.label}</span>
+                    <span style={{ opacity: active ? 1 : 0.3, fontSize: 10 }}>{active && sortDir === "asc" ? "↑" : active && sortDir === "desc" ? "↓" : "↕"}</span>
+                  </button>
+                  <ResizeHandle onResize={(dx) => resizeCol(ci, dx)} />
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
-          {sorted.map((j, i) => {
-            const isSelected = j.id === selectedId;
+          {sorted.map((job, ri) => {
+            const isEven = ri % 2 === 0;
+            const isSelected = job.id === selectedId;
+            const isHov = hovRow === ri;
+            const rowBg = isSelected ? "#eef2ff" : isHov ? "#f5f3ff" : isEven ? "var(--surface)" : "var(--surface-2)";
             return (
-              <tr
-                key={j.id}
-                onClick={() => onSelectJob(j.id)}
-                style={{
-                  background: isSelected ? "#eef2ff" : i % 2 === 0 ? "var(--surface)" : "var(--surface-2)",
-                  cursor: "pointer",
-                  borderLeft: isSelected ? "3px solid #6366f1" : "3px solid transparent",
-                }}
-                onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "#f5f3ff"; }}
-                onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = i % 2 === 0 ? "var(--surface)" : "var(--surface-2)"; }}
-              >
-                {SHEET_COLS.map((c) => {
-                  const val = c.get(j);
-                  if (c.key === "status") {
-                    const hex = j.status?.color_hex ?? "a3a3a3";
-                    const color = hex.startsWith("#") ? hex : `#${hex}`;
-                    return (
-                      <td key={c.key} style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", whiteSpace: "nowrap" }}>
-                        <span style={{ padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 500, background: color + "22", color, border: `1px solid ${color}55` }}>
-                          {val}
-                        </span>
-                      </td>
-                    );
-                  }
-                  if (c.key === "cross_verified") {
-                    return (
-                      <td key={c.key} style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", textAlign: "center" }}>
-                        <span style={{ color: val === "✓" ? "#16a34a" : "var(--text-3)", fontWeight: 700 }}>{val}</span>
-                      </td>
-                    );
-                  }
+              <tr key={job.id} style={{ height: 32, borderBottom: "1px solid var(--border)" }}
+                onMouseEnter={() => setHovRow(ri)} onMouseLeave={() => setHovRow(null)}>
+                <td onClick={() => onSelectJob(job.id)} style={{ position: "sticky", left: 0, zIndex: 10, background: rowBg, borderRight: "1px solid var(--border)", textAlign: "center", fontSize: 10, color: "var(--text-3)", userSelect: "none", cursor: "pointer", borderLeft: isSelected ? "3px solid #6366f1" : "3px solid transparent" }}>
+                  {ri + 1}
+                </td>
+                {SHEET_COLS.map((col, ci) => {
+                  const isFocused = focusCell?.[0] === ri && focusCell?.[1] === ci;
                   return (
-                    <td key={c.key} style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", color: val === "—" ? "var(--text-3)" : "var(--text)", whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {val}
+                    <td key={col.key}
+                      onClick={() => { setFocusCell([ri, ci]); if (col.type === "status" || col.type === "readonly") onSelectJob(job.id); }}
+                      style={{ position: col.sticky ? "sticky" : undefined, left: col.sticky ? stickyLeft : undefined, zIndex: col.sticky ? 10 : undefined, background: rowBg, borderRight: "1px solid var(--border)", padding: 0, overflow: "hidden", maxWidth: widths[ci], outline: isFocused ? "2px solid #6366f1" : undefined, outlineOffset: isFocused ? "-2px" : undefined }}>
+                      {col.type === "status" ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 10px", height: "100%" }}>
+                          {job.status
+                            ? <><span style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: job.status.color_hex.startsWith("#") ? job.status.color_hex : `#${job.status.color_hex}` }} /><span style={{ fontSize: 12, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.status.name}</span></>
+                            : EMPTY}
+                        </div>
+                      ) : (
+                        <SheetCell col={col} job={job} isFocused={isFocused} onFocus={() => setFocusCell([ri, ci])} onSave={(key, val) => onSaveCell(job.id, key, val)} onNavigate={(dir) => handleNavigate(ri, ci, dir)} />
+                      )}
                     </td>
                   );
                 })}
@@ -131,11 +255,7 @@ function SheetsView({ jobs, onSelectJob, selectedId, sortCol, setSortCol, sortDi
             );
           })}
           {sorted.length === 0 && (
-            <tr>
-              <td colSpan={SHEET_COLS.length} style={{ padding: 32, textAlign: "center", color: "var(--text-3)", fontSize: 13 }}>
-                No jobs found.
-              </td>
-            </tr>
+            <tr><td colSpan={SHEET_COLS.length + 1} style={{ padding: 40, textAlign: "center", color: "var(--text-3)", fontSize: 13 }}>No jobs found.</td></tr>
           )}
         </tbody>
       </table>
@@ -143,252 +263,341 @@ function SheetsView({ jobs, onSelectJob, selectedId, sortCol, setSortCol, sortDi
   );
 }
 
-const TEAM_LABELS: Record<TeamView, string> = {
-  all: "All columns",
-  pol: "POL Team",
-  france: "France Team",
+// ─── Card field config ────────────────────────────────────────────────────────
+
+const ALL_CARD_FIELDS: { key: string; label: string }[] = [
+  { key: "order_no",           label: "Order No" },
+  { key: "consignee_name",     label: "Consignee" },
+  { key: "shipper_name",       label: "Shipper" },
+  { key: "job_type",           label: "Job Type" },
+  { key: "vessel_name",        label: "Vessel" },
+  { key: "etd",                label: "ETD" },
+  { key: "eta",                label: "ETA" },
+  { key: "booking_no",         label: "Booking No" },
+  { key: "container_numbers",  label: "Containers" },
+  { key: "volume",             label: "Volume" },
+  { key: "gross_weight",       label: "Gross Wt" },
+  { key: "mbl_number",         label: "MBL No" },
+  { key: "pol",                label: "POL" },
+  { key: "console_no",         label: "Console No" },
+];
+
+const DEFAULT_CARD_FIELDS = ["order_no", "consignee_name", "etd", "vessel_name", "volume"];
+
+// ─── Team config ─────────────────────────────────────────────────────────────
+
+const TEAM_LABELS: Record<TeamView, string> = { all: "All columns", pol: "POL Team", france: "France Team" };
+const TEAM_COLORS: Record<TeamView, { bg: string; color: string; border: string }> = {
+  all:    { bg: "#f8fafc", color: "var(--text-2)", border: "var(--border)" },
+  pol:    { bg: "#eef2ff", color: "#4f46e5",       border: "#c7d2fe" },
+  france: { bg: "#fdf4ff", color: "#9333ea",       border: "#e9d5ff" },
 };
 
-const TEAM_COLORS: Record<TeamView, { bg: string; color: string; border: string }> = {
-  all: { bg: "#f8fafc", color: "var(--text-2)", border: "var(--border)" },
-  pol:    { bg: "#eef2ff", color: "#4f46e5", border: "#c7d2fe" },
-  france: { bg: "#fdf4ff", color: "#9333ea", border: "#e9d5ff" },
-};
+// ─── Board ────────────────────────────────────────────────────────────────────
 
 export function AiropsBoard() {
-  const [search, setSearch] = useState("");
+  const queryClient = useQueryClient();
   const [vesselFilter, setVesselFilter] = useState<string | null>(null);
+  const [podFilter, setPodFilter] = useState<string | null>(null);
   const [teamView, setTeamView] = useState<TeamView>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("board");
-  const [sortCol, setSortCol] = useState<string>("created_at");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [showFilterPanel, setShowFilterPanel] = useState(false);
+  const [showViewPanel, setShowViewPanel] = useState(false);
+  const [cardFields, setCardFields] = useState<string[]>(DEFAULT_CARD_FIELDS);
+  const [userTeam, setUserTeam] = useState<string>("");
+  const [dateFrom, setDateFrom] = useState<string>("");
+  const [dateTo, setDateTo] = useState<string>("");
 
-  // Read team from user metadata on mount — default board to their team
+
   useEffect(() => {
     createClient().auth.getUser().then(({ data }) => {
       const t = data.user?.user_metadata?.team;
-      if (t === "pol" || t === "france") setTeamView(t);
+      if (t === "pol" || t === "france") {
+        setTeamView(t);
+        setUserTeam(t);
+      } else if (t) {
+        setUserTeam(t);
+      }
     });
   }, []);
 
-  const filters: AiropsFilters = {
-    search: search || undefined,
-    vessel_id: vesselFilter ?? undefined,
-  };
-
+  const { selectedJobId, isPanelOpen, openPanel, globalSearch: search, setGlobalSearch: setSearch } = useAiropsStore();
+  const filters: AiropsFilters = { search: search || undefined, vessel_id: vesselFilter ?? undefined };
   const { data: statuses = [], isLoading: statusLoading } = useAiropsStatuses();
   const { data: jobs = [], isLoading: jobsLoading } = useAiropsJobs(filters);
   const { data: vessels = [] } = useAiropsVessels();
   const updateJob = useUpdateJob();
-  const { selectedJobId, isPanelOpen, openPanel, closePanel } = useAiropsStore();
 
-  // Filter statuses by team view
-  const visibleStatuses =
-    teamView === "pol"
-      ? statuses.filter((s) => s.display_order <= 15)
-      : teamView === "france"
-      ? statuses.filter((s) => s.display_order > 15)
-      : statuses;
+  const uniquePods = useMemo(() => {
+    const pods = vessels.map((v) => v.pod).filter((p): p is string => !!p);
+    return Array.from(new Set(pods)).sort();
+  }, [vessels]);
+
+  const filteredJobs = useMemo(() => {
+    return jobs.filter((j) => {
+      if (podFilter && j.container?.vessel?.pod !== podFilter) return false;
+      if (dateFrom) {
+        const etd = j.data.etd ?? j.data.current_etd;
+        if (!etd || etd < dateFrom) return false;
+      }
+      if (dateTo) {
+        const etd = j.data.etd ?? j.data.current_etd;
+        if (!etd || etd > dateTo) return false;
+      }
+      return true;
+    });
+  }, [jobs, podFilter, dateFrom, dateTo]);
+
+  const visibleStatuses = teamView === "pol"
+    ? statuses.filter((s) => s.display_order <= 15)
+    : teamView === "france"
+    ? statuses.filter((s) => s.display_order > 15)
+    : statuses;
 
   function handleDrop(jobId: string, newStatusId: string, newOrder: number) {
     updateJob.mutate({ id: jobId, updates: { status_id: newStatusId, column_order: newOrder } });
+  }
+
+  function handleSaveCell(jobId: string, key: string, val: string | number | boolean) {
+    updateJob.mutate({ id: jobId, updates: { data: { [key]: val } } });
   }
 
   const isLoading = statusLoading || jobsLoading;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Board header */}
-      <div
-        className="flex items-center gap-3 px-4 py-3 shrink-0"
-        style={{ borderBottom: "1px solid var(--border)", background: "var(--surface)" }}
-      >
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 shrink-0" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
+
         {/* Title + view toggle */}
         <div className="flex items-center gap-2 mr-2">
-          <div
-            className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-            style={{ background: "#6366f1" }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="7" height="18" rx="1" />
-              <rect x="14" y="3" width="7" height="10" rx="1" />
-              <rect x="14" y="17" width="7" height="4" rx="1" />
+          <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0" style={{ background: "#6366f1" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.8" strokeLinecap="round">
+              <rect x="3" y="3" width="7" height="18" rx="1" /><rect x="14" y="3" width="7" height="10" rx="1" /><rect x="14" y="17" width="7" height="4" rx="1" />
             </svg>
           </div>
-          <span className="text-[14px] font-semibold" style={{ color: "var(--text)" }}>
-            AirOps
-          </span>
-          {/* Board / Sheets toggle */}
-          <div
-            className="flex items-center rounded-lg p-0.5 ml-1"
-            style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}
-          >
+          <span className="text-[14px] font-semibold" style={{ color: "var(--text)" }}>AirOps</span>
+          <div className="flex items-center rounded-lg p-0.5 ml-1" style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}>
             {(["board", "sheets"] as ViewMode[]).map((m) => (
-              <button
-                key={m}
-                onClick={() => setViewMode(m)}
+              <button key={m} onClick={() => setViewMode(m)}
                 className="flex items-center gap-1.5 px-2.5 h-6 rounded-md text-xs font-medium transition-all"
-                style={{
-                  background: viewMode === m ? "var(--surface)" : "transparent",
-                  color: viewMode === m ? "#6366f1" : "var(--text-3)",
-                  boxShadow: viewMode === m ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-                }}
-              >
-                {m === "board" ? (
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="7" height="18" rx="1" /><rect x="14" y="3" width="7" height="10" rx="1" /></svg>
-                ) : (
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M3 15h18M9 3v18" /></svg>
-                )}
+                style={{ background: viewMode === m ? "var(--surface)" : "transparent", color: viewMode === m ? "#6366f1" : "var(--text-3)", boxShadow: viewMode === m ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>
+                {m === "board"
+                  ? <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="7" height="18" rx="1" /><rect x="14" y="3" width="7" height="10" rx="1" /></svg>
+                  : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M3 15h18M9 3v18" /></svg>}
                 {m.charAt(0).toUpperCase() + m.slice(1)}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Search */}
-        <div
-          className="flex items-center gap-2 h-8 rounded-lg px-3 min-w-[200px]"
-          style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" style={{ color: "var(--text-3)", flexShrink: 0 }}>
-            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
-          </svg>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search jobs…"
-            className="flex-1 bg-transparent text-[13px]"
-            style={{ color: "var(--text)", border: "none", outline: "none" }}
-          />
-          {search && (
-            <button onClick={() => setSearch("")} style={{ color: "var(--text-3)" }}>
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="m4 4 8 8M12 4l-8 8" /></svg>
-            </button>
-          )}
-        </div>
-
-        {/* Vessel filter chips */}
-        {vessels.length > 0 && (
-          <div className="flex items-center gap-1.5 overflow-x-auto">
+        {/* Filter button */}
+        {(() => {
+          const activeCount = (vesselFilter ? 1 : 0) + (podFilter ? 1 : 0) + (teamView !== "all" ? 1 : 0) + (dateFrom || dateTo ? 1 : 0);
+          return (
             <button
-              onClick={() => setVesselFilter(null)}
-              className="px-2.5 h-7 rounded-md text-xs font-medium shrink-0 transition-colors"
+              onClick={() => { setShowFilterPanel((o) => !o); setShowViewPanel(false); }}
+              className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium shrink-0"
               style={{
-                background: vesselFilter === null ? "#6366f1" : "var(--surface-2)",
-                color: vesselFilter === null ? "white" : "var(--text-2)",
-                border: vesselFilter === null ? "none" : "1px solid var(--border)",
-              }}
-            >
-              All vessels
+                background: showFilterPanel || activeCount > 0 ? "#eef2ff" : "var(--surface-2)",
+                color: showFilterPanel || activeCount > 0 ? "#4f46e5" : "var(--text-2)",
+                border: "1px solid var(--border)",
+              }}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 3H2l8 9.46V19l4 2v-8.54Z" /></svg>
+              Filters
+              {activeCount > 0 && (
+                <span className="flex items-center justify-center w-4 h-4 rounded-full text-[10px] font-semibold text-white" style={{ background: "#4f46e5", lineHeight: 1 }}>
+                  {activeCount}
+                </span>
+              )}
             </button>
-            {vessels.map((v) => (
-              <button
-                key={v.id}
-                onClick={() => setVesselFilter(v.id === vesselFilter ? null : v.id)}
-                className="px-2.5 h-7 rounded-md text-xs font-medium shrink-0 transition-colors"
-                style={{
-                  background: vesselFilter === v.id ? "#6366f1" : "var(--surface-2)",
-                  color: vesselFilter === v.id ? "white" : "var(--text-2)",
-                  border: vesselFilter === v.id ? "none" : "1px solid var(--border)",
-                }}
-              >
-                {v.name}
-              </button>
-            ))}
-          </div>
-        )}
+          );
+        })()}
 
-        {/* Team view toggle */}
-        <div className="flex items-center rounded-lg overflow-hidden shrink-0" style={{ border: "1px solid var(--border)" }}>
-          {(["all", "pol", "france"] as TeamView[]).map((t) => {
-            const active = teamView === t;
-            const tc = TEAM_COLORS[t];
-            return (
-              <button
-                key={t}
-                onClick={() => setTeamView(t)}
-                className="px-3 h-7 text-xs font-medium transition-colors"
-                style={{
-                  background: active ? tc.bg : "var(--surface-2)",
-                  color: active ? tc.color : "var(--text-3)",
-                  borderRight: t !== "france" ? "1px solid var(--border)" : "none",
-                }}
-              >
-                {TEAM_LABELS[t]}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Stats */}
-        <span className="text-xs tabular-nums" style={{ color: "var(--text-3)" }}>
-          {jobs.length} job{jobs.length !== 1 ? "s" : ""}
-        </span>
-
-        {/* Canvas link */}
-        <Link
-          href="/airops/canvas"
-          className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium transition-colors"
+        {/* View button */}
+        <button
+          onClick={() => { setShowViewPanel((o) => !o); setShowFilterPanel(false); }}
+          className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium shrink-0"
           style={{
-            background: "var(--surface-2)",
-            color: "var(--text-2)",
+            background: showViewPanel ? "#eef2ff" : "var(--surface-2)",
+            color: showViewPanel ? "#4f46e5" : "var(--text-2)",
             border: "1px solid var(--border)",
-          }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="6" cy="8" r="2" /><circle cx="18" cy="8" r="2" /><circle cx="12" cy="17" r="2" />
-            <path d="M8 8h8M7 10l4 6M17 10l-4 6" />
-          </svg>
+          }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+          View
+        </button>
+
+        <div className="flex-1" />
+        <span className="text-xs tabular-nums" style={{ color: "var(--text-3)" }}>{filteredJobs.length} job{filteredJobs.length !== 1 ? "s" : ""}</span>
+
+        {/* Refresh */}
+        <button
+          onClick={() => queryClient.invalidateQueries()}
+          title="Refresh"
+          className="flex items-center justify-center w-8 h-8 rounded-lg transition-colors"
+          style={{ background: "var(--surface-2)", border: "1px solid var(--border)", color: "var(--text-3)" }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = "#6366f1")}
+          onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-3)")}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" /></svg>
+        </button>
+
+        <ConsigneeApprovalBell team={userTeam || "pol"} />
+
+        <Link href="/airops/canvas" className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium" style={{ background: "var(--surface-2)", color: "var(--text-2)", border: "1px solid var(--border)" }}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><circle cx="6" cy="8" r="2" /><circle cx="18" cy="8" r="2" /><circle cx="12" cy="17" r="2" /><path d="M8 8h8M7 10l4 6M17 10l-4 6" /></svg>
           Canvas
         </Link>
-
-        {/* New job */}
-        <Link
-          href="/booking"
-          className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium text-white"
-          style={{ background: "#6366f1" }}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
+        <Link href="/booking" className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium text-white" style={{ background: "#6366f1" }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
           New Job
         </Link>
       </div>
+
+      {/* ── Filter panel (Bajaj-style inline bar) ─────────────────────────────── */}
+      {showFilterPanel && (
+        <div className="px-5 py-3 shrink-0 flex items-start gap-6 flex-wrap" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
+          {/* Vessel */}
+          <div className="flex-1 min-w-[200px]">
+            <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--text-3)" }}>Vessel</p>
+            <div className="flex flex-wrap gap-1.5">
+              <button onClick={() => setVesselFilter(null)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
+                style={{ background: !vesselFilter ? "#6366f1" : "var(--surface)", color: !vesselFilter ? "white" : "var(--text-2)", border: "1px solid var(--border)" }}>All</button>
+              {vessels.map((v) => (
+                <button key={v.id} onClick={() => setVesselFilter(v.id === vesselFilter ? null : v.id)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
+                  style={{ background: vesselFilter === v.id ? "#6366f1" : "var(--surface)", color: vesselFilter === v.id ? "white" : "var(--text-2)", border: "1px solid var(--border)" }}>
+                  {v.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* POD */}
+          {uniquePods.length > 0 && (
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--text-3)" }}>POD</p>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => setPodFilter(null)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
+                  style={{ background: !podFilter ? "#6366f1" : "var(--surface)", color: !podFilter ? "white" : "var(--text-2)", border: "1px solid var(--border)" }}>All</button>
+                {uniquePods.map((p) => (
+                  <button key={p} onClick={() => setPodFilter(p === podFilter ? null : p)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
+                    style={{ background: podFilter === p ? "#6366f1" : "var(--surface)", color: podFilter === p ? "white" : "var(--text-2)", border: "1px solid var(--border)" }}>{p}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Team */}
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--text-3)" }}>Team</p>
+            <div className="flex flex-wrap gap-1.5">
+              {(["all", "pol", "france"] as TeamView[]).map((t) => {
+                const active = teamView === t;
+                const tc = TEAM_COLORS[t];
+                return (
+                  <button key={t} onClick={() => setTeamView(t)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
+                    style={{ background: active ? tc.bg : "var(--surface)", color: active ? tc.color : "var(--text-3)", border: `1px solid ${active ? tc.border : "var(--border)"}` }}>
+                    {TEAM_LABELS[t]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Date range */}
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--text-3)" }}>ETD Range</p>
+            <div className="flex items-center gap-2">
+              <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+                className="h-6 rounded-md px-2 text-xs"
+                style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", outline: "none" }} />
+              <span className="text-xs" style={{ color: "var(--text-3)" }}>→</span>
+              <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+                className="h-6 rounded-md px-2 text-xs"
+                style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", outline: "none" }} />
+              {(dateFrom || dateTo) && (
+                <button onClick={() => { setDateFrom(""); setDateTo(""); }} className="text-xs" style={{ color: "#6366f1" }}>Clear</button>
+              )}
+            </div>
+          </div>
+
+          {/* Clear all + close */}
+          <div className="flex flex-col justify-between items-end ml-auto">
+            <button onClick={() => setShowFilterPanel(false)} style={{ color: "var(--text-3)" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="m4 4 16 16M20 4 4 20" /></svg>
+            </button>
+            {(vesselFilter || podFilter || teamView !== "all" || dateFrom || dateTo) && (
+              <button onClick={() => { setVesselFilter(null); setPodFilter(null); setTeamView("all"); setDateFrom(""); setDateTo(""); }}
+                className="text-xs font-medium mt-auto" style={{ color: "#4f46e5" }}>
+                Clear all
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── View panel (Bajaj-style inline bar) ──────────────────────────────── */}
+      {showViewPanel && (
+        <div className="px-5 py-3 shrink-0" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
+          <div className="flex items-start gap-4">
+            <div className="flex-1">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--text-3)" }}>
+                  Card fields <span className="normal-case font-normal" style={{ color: "var(--text-3)" }}>(up to 5)</span>
+                </p>
+                <button onClick={() => setCardFields(DEFAULT_CARD_FIELDS)} className="text-[11px]" style={{ color: "#4f46e5" }}>Reset</button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {ALL_CARD_FIELDS.map((f) => {
+                  const selected = cardFields.includes(f.key);
+                  const disabled = !selected && cardFields.length >= 5;
+                  return (
+                    <button key={f.key}
+                      onClick={() => {
+                        if (selected) setCardFields((p) => p.filter((k) => k !== f.key));
+                        else if (!disabled) setCardFields((p) => [...p, f.key]);
+                      }}
+                      className="px-2 py-0.5 rounded-md text-[11px] font-medium border transition-colors"
+                      style={{
+                        background: selected ? "#eef2ff" : "var(--surface)",
+                        color: selected ? "#4f46e5" : "var(--text-2)",
+                        borderColor: selected ? "#c7d2fe" : "var(--border)",
+                        opacity: disabled ? 0.4 : 1,
+                        cursor: disabled ? "not-allowed" : "pointer",
+                      }}>
+                      {f.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <button onClick={() => setShowViewPanel(false)} style={{ color: "var(--text-3)", marginTop: 2 }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="m4 4 16 16M20 4 4 20" /></svg>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main area */}
       <div className="flex-1 flex overflow-hidden relative">
         {isLoading ? (
           <div className="flex flex-1 items-center justify-center gap-2.5">
-            {[0, 150, 300].map((d) => (
-              <div key={d} className="size-2 rounded-full animate-pulse" style={{ background: "var(--border-2)", animationDelay: `${d}ms` }} />
-            ))}
+            {[0, 150, 300].map((d) => <div key={d} className="size-2 rounded-full animate-pulse" style={{ background: "var(--border-2)", animationDelay: `${d}ms` }} />)}
           </div>
         ) : viewMode === "board" ? (
           <div className="flex items-stretch overflow-x-auto overflow-y-hidden flex-1">
-            {visibleStatuses.map((status, idx) => (
-              <AiropsColumn
-                key={status.id}
-                status={status}
-                jobs={jobs.filter(
-                  (j) =>
-                    j.status_id === status.id ||
-                    (idx === 0 && teamView === "all" && (j.status_id === null || j.status_id === undefined))
-                )}
-                selectedId={selectedJobId}
-                onSelectCard={openPanel}
-                onDrop={handleDrop}
-              />
-            ))}
+            {visibleStatuses.map((status, idx) => {
+              const colJobs = filteredJobs.filter((j) => j.status_id === status.id || (idx === 0 && teamView === "all" && (j.status_id === null || j.status_id === undefined)));
+              if (search.trim() && colJobs.length === 0) return null;
+              return (
+              <AiropsColumn key={status.id} status={status}
+                jobs={colJobs}
+                selectedId={selectedJobId} onSelectCard={openPanel} onDrop={handleDrop} cardFields={cardFields} />
+              );
+            })}
           </div>
         ) : (
-          /* ── Sheets view ── */
-          <SheetsView jobs={jobs} onSelectJob={openPanel} selectedId={selectedJobId} sortCol={sortCol} setSortCol={setSortCol} sortDir={sortDir} setSortDir={setSortDir} />
+          <SheetsView jobs={filteredJobs} onSelectJob={openPanel} selectedId={selectedJobId} onSaveCell={handleSaveCell} />
         )}
-
-        {/* Detail panel */}
         {isPanelOpen && <AiropsDetailPanel />}
       </div>
     </div>

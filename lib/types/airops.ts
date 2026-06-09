@@ -40,6 +40,7 @@ export interface AiropsJobData {
   // Booking Info
   order_no?: string;
   consignee_name?: string;
+  consignee_email?: string;
   shipper_name?: string;
   quantity_pcs?: number;
   volume?: number;

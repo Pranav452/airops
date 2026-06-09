@@ -283,7 +283,7 @@ interface EditableFieldProps {
   label: string;
   value?: string | number | null;
   type?: "text" | "date" | "number";
-  onSave: (val: string) => void;
+  onSave: (val: string) => void | Promise<void>;
   redIfPast?: boolean;
   placeholder?: string;
 }
@@ -647,8 +647,6 @@ export function AiropsDetailPanel() {
   return (
     <AnimatePresence>
       {isPanelOpen && (
-        <>
-          {/* Overlay */}
           <motion.div
             key="overlay"
             initial={{ opacity: 0 }}
@@ -664,7 +662,8 @@ export function AiropsDetailPanel() {
             }}
           />
 
-          {/* Panel */}
+      )}
+      {isPanelOpen && (
           <motion.div
             key="panel"
             initial={{ x: "100%" }}
@@ -818,6 +817,7 @@ export function AiropsDetailPanel() {
                 <Section title="Booking Info">
                   <FieldGrid>
                     <EditableField label="Consignee" value={d.consignee_name} onSave={(v) => saveData("consignee_name", v)} />
+                    <EditableField label="Consignee Email" value={d.consignee_email} onSave={(v) => saveData("consignee_email", v)} />
                     <EditableField label="Shipper" value={d.shipper_name} onSave={(v) => saveData("shipper_name", v)} />
                     <JobTypeField value={d.job_type} onSave={(v) => saveData("job_type", v)} />
                     <EditableField label="Qty (pcs)" value={d.quantity_pcs} type="number" onSave={(v) => saveData("quantity_pcs", parseFloat(v) || 0)} />
@@ -872,7 +872,24 @@ export function AiropsDetailPanel() {
                     <EditableField label="Booking No." value={d.booking_no} onSave={(v) => saveData("booking_no", v)} />
                     <EditableField label="Vessel Name" value={d.vessel_name} onSave={(v) => saveData("vessel_name", v)} />
                     <EditableField label="ETD" value={d.etd} type="date" onSave={(v) => saveData("etd", v)} redIfPast />
-                    <EditableField label="ETA" value={d.eta} type="date" onSave={(v) => saveData("eta", v)} />
+                    <EditableField
+                      label="ETA"
+                      value={d.eta}
+                      type="date"
+                      onSave={async (v) => {
+                        const oldEta = d.eta ?? null;
+                        saveData("eta", v);
+                        if (v && v !== oldEta && d.consignee_email) {
+                          try {
+                            await fetch("/api/airops/eta-alert", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ job_id: job.id, old_eta: oldEta, new_eta: v }),
+                            });
+                          } catch { /* non-blocking */ }
+                        }
+                      }}
+                    />
                     <EditableField label="Current ETD" value={d.current_etd} type="date" onSave={(v) => saveData("current_etd", v)} redIfPast />
                     <EditableField label="DO ETD" value={d.do_etd} type="date" onSave={(v) => saveData("do_etd", v)} />
                   </FieldGrid>
@@ -1064,15 +1081,19 @@ export function AiropsDetailPanel() {
                 </Section>
 
                 {/* 9. Shipper Documents */}
-                {d.documents && d.documents.length > 0 && (
-                  <Section title="Shipper Documents">
-                    <div className="flex flex-col gap-1 px-2">
+                <Section title="Shipper Documents">
+                  {d.documents && d.documents.length > 0 ? (
+                    <div className="flex flex-col gap-1">
                       {d.documents.map((doc) => (
                         <DocumentRow key={doc.path} doc={doc} jobId={job.id} />
                       ))}
                     </div>
-                  </Section>
-                )}
+                  ) : (
+                    <span style={{ fontSize: 12.5, color: "var(--text-3)", fontStyle: "italic", padding: "2px 8px", display: "block" }}>
+                      No documents uploaded.
+                    </span>
+                  )}
+                </Section>
 
                 {/* 10. Comments */}
                 <Section title="Comments">
@@ -1195,7 +1216,6 @@ export function AiropsDetailPanel() {
               </div>
             )}
           </motion.div>
-        </>
       )}
       {/* Stuffing Email Modal — rendered outside panel so z-index stacks correctly */}
       {showStuffingEmail && job && (
