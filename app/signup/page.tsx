@@ -24,7 +24,6 @@ export default function SignupPage() {
 
     const sb = createClient();
 
-    // Sign up — email confirmation is OFF so session comes back immediately
     const { data: signUpData, error: signUpErr } = await sb.auth.signUp({
       email,
       password,
@@ -37,19 +36,27 @@ export default function SignupPage() {
       return;
     }
 
-    // If we already have a session (email confirmation off), go straight to board
+    // If we already have a session, go straight to board
     if (signUpData.session) {
       router.push("/airops/board");
       router.refresh();
       return;
     }
 
-    // No session yet — sign in explicitly (handles edge cases / existing unconfirmed users)
+    // No session — the project still has "Confirm email" on. Auto-confirm
+    // server-side with the service-role key, then sign in.
+    if (signUpData.user?.id) {
+      await fetch("/api/airops/auth/confirm-signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: signUpData.user.id, email, team }),
+      }).catch(() => {});
+    }
+
     const { error: signInErr } = await sb.auth.signInWithPassword({ email, password });
     setLoading(false);
 
     if (signInErr) {
-      // Sign-up worked but sign-in failed — send them to login with a helpful message
       setError("Account created — please sign in below.");
       router.push("/login");
       return;
