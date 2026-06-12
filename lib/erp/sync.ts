@@ -254,22 +254,21 @@ export function isPlaceholderVessel(name: string | null | undefined): boolean {
   return !!n && PLACEHOLDER_VESSELS.includes(n);
 }
 
-async function fetchErpRows(pastDays: number) {
+async function fetchErpRows() {
   const pool = await getErpPool();
 
   // Single pass: all current-year SEA jobs (~3k rows — cheap with simple
-  // WHERE; the window filter happens in JS because ERP dates are
+  // WHERE; date filtering happens in JS because ERP dates are
   // DD/MM/YYYY varchars and date-filtering the join times out).
   const res = await pool.request().query<ErpJobRow>(`${JOB_SELECT}
 WHERE m.expt_mode = 'sea'
   AND SUBSTRING(RTRIM(m.exptno), 6, 2) = RIGHT(CONVERT(varchar(4), YEAR(GETDATE())), 2);`);
 
-  // Keep a job when it has no usable ETD (backlog / placeholder vessel /
-  // not scheduled) or its ETD is no older than the past window. No upper
-  // bound — far-future ETDs are either real bookings or parking vessels.
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - pastDays);
-  const cutoffIso = cutoff.toISOString().slice(0, 10);
+  // Whole current year, nothing prior: keep a job when it has no usable ETD
+  // (backlog / placeholder vessel) or its ETD falls on/after Jan 1 of this
+  // year. No upper bound — far-future ETDs are real bookings or parking
+  // vessels. At new year the previous year's jobs auto-archive.
+  const cutoffIso = `${new Date().getFullYear()}-01-01`;
 
   const jobs = res.recordset.filter((j) => {
     const etd = ddmmyyyyToIso(j.pol_etd);
@@ -435,7 +434,6 @@ export interface SyncResult {
 export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncResult> {
   const sb = admin();
   const warnings: string[] = [];
-  const pastDays = Number(process.env.ERP_SYNC_ETD_PAST_DAYS ?? 45);
 
   // 0. optional wipe of seed/demo rows (keeps airops_statuses)
   if (opts.wipe) {
@@ -451,7 +449,7 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
   }
 
   // 1. pull from ERP
-  const { jobs, containers, orders, france, arrivals } = await fetchErpRows(pastDays);
+  const { jobs, containers, orders, france, arrivals } = await fetchErpRows();
 
   // 2. statuses lookup (name → id, display_order)
   const { data: statuses, error: stErr } = await sb
