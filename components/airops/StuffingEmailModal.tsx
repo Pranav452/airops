@@ -8,10 +8,16 @@ interface Props {
   onClose: () => void;
 }
 
-const QUICK_RECIPIENTS = [
-  { label: "Consignee", value: "consignee@placeholder.com" },
-  { label: "POL Team", value: "pol.team@placeholder.com" },
-];
+const POL_TEAM_EMAIL =
+  process.env.NEXT_PUBLIC_POL_TEAM_EMAIL ?? "mpcargolille@gmail.com";
+
+function quickRecipients(job: AiropsJob) {
+  const consignee = job.data?.consignee_email?.trim();
+  return [
+    ...(consignee ? [{ label: "Consignee", value: consignee }] : []),
+    { label: "POL Team", value: POL_TEAM_EMAIL },
+  ];
+}
 
 function buildSubject(job: AiropsJob): string {
   const d = job.data ?? {};
@@ -151,7 +157,7 @@ export function StuffingEmailModal({ job, onClose }: Props) {
             flexWrap: "wrap",
           }}
         >
-          {QUICK_RECIPIENTS.map((q) => (
+          {quickRecipients(job).map((q) => (
             <button
               key={q.value}
               onClick={() => setTo(q.value)}

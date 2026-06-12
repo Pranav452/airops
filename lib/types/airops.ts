@@ -20,6 +20,8 @@ export interface AiropsVessel {
   canvas_x: number;
   canvas_y: number;
   created_at: string;
+  /** ERP vessel rotation number (vsl_master.vsl_rtno) — set by sync */
+  erp_rtno?: string | null;
 }
 
 export interface AiropsContainer {
@@ -32,6 +34,8 @@ export interface AiropsContainer {
   canvas_x: number;
   canvas_y: number;
   created_at: string;
+  /** ERP container id (expt_container.containerid) — set by sync */
+  erp_key?: string | null;
   vessel?: AiropsVessel;
   jobs?: AiropsJob[];
 }
@@ -64,6 +68,10 @@ export interface AiropsJobData {
   hbl_number?: string;
   sb_number?: string;
   erp_exp_number?: string;
+  /** comma-joined buyer PO numbers from ERP expt_orderno */
+  buyer_order_nos?: string;
+  /** set true by ERP sync when the job leaves the sync window; hidden from board */
+  archived?: boolean;
   // Stuffing checklist
   si_filing_tick?: boolean;
   vgm_tick?: boolean;

@@ -378,6 +378,7 @@ export function AiropsBoard() {
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
   const [actorEmail, setActorEmail] = useState<string>("");
+  const [syncState, setSyncState] = useState<"idle" | "running" | "done" | "error">("idle");
 
   useEffect(() => {
     createClient().auth.getUser().then(({ data }) => {
@@ -517,6 +518,23 @@ export function AiropsBoard() {
     [jobs, statuses, autoRules, updateJob, actorEmail]
   );
 
+  async function handleErpSync() {
+    if (syncState === "running") return;
+    setSyncState("running");
+    try {
+      const res = await fetch("/api/erp/sync", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok || !body.ok) throw new Error(body.error ?? "sync failed");
+      setSyncState("done");
+      queryClient.invalidateQueries();
+      setTimeout(() => setSyncState("idle"), 4000);
+    } catch (err) {
+      console.error("ERP sync failed:", err);
+      setSyncState("error");
+      setTimeout(() => setSyncState("idle"), 6000);
+    }
+  }
+
   const isLoading = statusLoading || jobsLoading;
 
   return (
@@ -584,6 +602,25 @@ export function AiropsBoard() {
 
         <div className="flex-1" />
         <span className="text-xs tabular-nums" style={{ color: "var(--text-3)" }}>{filteredJobs.length} job{filteredJobs.length !== 1 ? "s" : ""}</span>
+
+        {/* ERP Sync */}
+        <button
+          onClick={handleErpSync}
+          disabled={syncState === "running"}
+          title="Pull latest jobs, vessels and containers from the ERP database"
+          className="flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-medium shrink-0 transition-colors"
+          style={{
+            background: syncState === "error" ? "#fef2f2" : syncState === "done" ? "#ecfdf5" : "var(--surface-2)",
+            border: "1px solid var(--border)",
+            color: syncState === "error" ? "#dc2626" : syncState === "done" ? "#059669" : "#6366f1",
+            opacity: syncState === "running" ? 0.7 : 1,
+          }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            className={syncState === "running" ? "animate-spin" : ""}>
+            <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" />
+          </svg>
+          {syncState === "running" ? "Syncing…" : syncState === "done" ? "Synced" : syncState === "error" ? "Sync failed" : "ERP Sync"}
+        </button>
 
         {/* Refresh */}
         <button
@@ -661,6 +698,29 @@ export function AiropsBoard() {
           {/* Date range */}
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--text-3)" }}>ETD Range</p>
+            <div className="flex items-center gap-1.5 mb-2">
+              {([
+                { label: "This month", from: () => { const n = new Date(); return [new Date(n.getFullYear(), n.getMonth(), 1), new Date(n.getFullYear(), n.getMonth() + 1, 0)] as const; } },
+                { label: "Sailed", from: () => [null, new Date()] as const },
+                { label: "Upcoming", from: () => [new Date(), null] as const },
+              ]).map((p) => {
+                const fmt = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : "");
+                const [f, t] = p.from();
+                const active = dateFrom === fmt(f) && dateTo === fmt(t);
+                return (
+                  <button key={p.label}
+                    onClick={() => { setDateFrom(active ? "" : fmt(f)); setDateTo(active ? "" : fmt(t)); }}
+                    className="h-6 px-2.5 rounded-full text-[11px] font-medium"
+                    style={{
+                      background: active ? "#eef2ff" : "var(--surface)",
+                      color: active ? "#4f46e5" : "var(--text-3)",
+                      border: `1px solid ${active ? "#c7d2fe" : "var(--border)"}`,
+                    }}>
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
             <div className="flex items-center gap-2">
               <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
                 className="h-6 rounded-md px-2 text-xs"

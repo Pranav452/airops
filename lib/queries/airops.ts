@@ -42,7 +42,10 @@ export function useAiropsJobs(filters?: AiropsFilters) {
         .select(
           `*, status:airops_statuses(*), container:airops_containers(*, vessel:airops_vessels(*))`
         )
-        .order("column_order");
+        // hide jobs archived by the ERP sync (sailed out of the sync window)
+        .or("data->>archived.is.null,data->>archived.neq.true")
+        .order("column_order")
+        .limit(5000);
 
       if (filters?.search) {
         q = q.ilike("data->>order_no", `%${filters.search}%`);

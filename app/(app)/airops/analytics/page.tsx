@@ -71,7 +71,11 @@ export default function AnalyticsPage() {
     const totalJobs = jobs.length;
     const completedJobs = jobs.filter((j) => j.status?.name?.toLowerCase() === "completed").length;
     const activeJobs = totalJobs - completedJobs;
-    const thisMonth = jobs.filter((j) => j.created_at?.startsWith(thisMonthPrefix)).length;
+    // bucket jobs by sailing month (ETD), not row creation date — ERP sync
+    // creates all rows at once, so created_at says nothing about the shipment
+    const jobMonth = (j: (typeof jobs)[number]) =>
+      j.data.etd ?? j.data.current_etd ?? j.created_at;
+    const thisMonth = jobs.filter((j) => jobMonth(j)?.startsWith(thisMonthPrefix)).length;
 
     // Volume / weight
     const volumes = jobs.map((j) => j.data.volume).filter((v): v is number => typeof v === "number");
@@ -112,7 +116,7 @@ export default function AnalyticsPage() {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const prefix = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
       const label = `${MONTH_LABELS[d.getMonth()]} ${d.getFullYear().toString().slice(2)}`;
-      const count = jobs.filter((j) => j.created_at?.startsWith(prefix)).length;
+      const count = jobs.filter((j) => jobMonth(j)?.startsWith(prefix)).length;
       monthlyData.push({ label, count });
     }
     const maxMonthCount = Math.max(1, ...monthlyData.map((m) => m.count));
