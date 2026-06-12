@@ -137,6 +137,8 @@ interface ErpFranceRow {
   delivery_dt: unknown;
   statut_douane: string | null;
   transporter: string | null;
+  fra_invno: string | null;
+  fra_invdt: string | null;
 }
 
 interface ErpArrivalRow {
@@ -158,6 +160,8 @@ function inferStatusName(
 ): string {
   // France-side rungs (latest first)
   if (fr) {
+    // France invoice raised → job billed → done
+    if (str(fr.fra_invno)) return "Completed";
     // delivery date can be future-dated (scheduled) — completed only once past
     const deliveredIso = anyToIso(fr.delivery_dt);
     if (deliveredIso && deliveredIso <= new Date().toISOString().slice(0, 10)) {
@@ -368,7 +372,9 @@ SELECT
   t1.CUSTOM_CLEAR_DT      AS t1_dt,
   del.actualdt            AS delivery_dt,
   RTRIM(del.STATUT_DUANE) AS statut_douane,
-  RTRIM(del.TRANSPORTER)  AS transporter
+  RTRIM(del.TRANSPORTER)  AS transporter,
+  RTRIM(inv.invno)        AS fra_invno,
+  RTRIM(inv.invdt)        AS fra_invdt
 FROM console_jobdtls cj
 LEFT JOIN TBL_IMPFRA_CONSOLE_DOSSIER_OBSERVATION o
   ON o.CONSOLENO = RIGHT(RTRIM(cj.consoleno), 10)
@@ -386,6 +392,13 @@ OUTER APPLY (
   WHERE RTRIM(dm.codeno) = RTRIM(cj.jobno) AND RTRIM(dm.keyfield) = 'jobno'
   ORDER BY dm.deliveryno DESC
 ) del
+OUTER APPLY (
+  SELECT TOP 1 i.invno, i.invdt
+  FROM console_invjob ij
+  JOIN console_invoice i ON RTRIM(i.invno) = RTRIM(ij.invno)
+  WHERE RTRIM(ij.jobno) = RTRIM(cj.jobno)
+  ORDER BY ij.id DESC
+) inv
 WHERE RTRIM(cj.exptno) IN (${inList})${hblClause};`);
     france.push(...fraRes.recordset);
   }
@@ -734,6 +747,7 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
       transporter: fr ? str(fr.transporter) : undefined,
       delivery_date: anyToIso(fr?.delivery_dt) ?? undefined,
       statut_douane: fr ? str(fr.statut_douane) : undefined,
+      facture_no: fr ? str(fr.fra_invno) : undefined,
       t1_no: fr ? str(fr.t1_no) : undefined,
       t1_date: anyToIso(fr?.t1_dt) ?? undefined,
       container_release_info:
