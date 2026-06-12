@@ -74,6 +74,10 @@ export interface AiropsJobData {
   archived?: boolean;
   /** France console number from ERP console_jobdtls */
   console_no_erp?: string;
+  /** France delivery date (expt_deliverymain.actualdt) — may be future = scheduled */
+  delivery_date?: string;
+  /** France customs status free-text (e.g. "SOUS DOUANE / T1", "DEDOUANE") */
+  statut_douane?: string;
   // Stuffing checklist
   si_filing_tick?: boolean;
   vgm_tick?: boolean;

@@ -134,6 +134,9 @@ interface ErpFranceRow {
   j_instr: unknown;
   t1_no: string | null;
   t1_dt: unknown;
+  delivery_dt: unknown;
+  statut_douane: string | null;
+  transporter: string | null;
 }
 
 interface ErpArrivalRow {
@@ -155,6 +158,11 @@ function inferStatusName(
 ): string {
   // France-side rungs (latest first)
   if (fr) {
+    // delivery date can be future-dated (scheduled) — completed only once past
+    const deliveredIso = anyToIso(fr.delivery_dt);
+    if (deliveredIso && deliveredIso <= new Date().toISOString().slice(0, 10)) {
+      return "Completed";
+    }
     if (str(fr.t1_no) || anyToIso(fr.t1_recvd) || anyToIso(fr.t1_sent)) return "T1/IMA";
     if (ata || ddmmyyyyToIso(j.arrivaldt)) return "ATA";
     if (str(fr.pincode)) return "CPU/SCR";
@@ -357,7 +365,10 @@ SELECT
   jo.ORD_DE_TRANS         AS j_odt,
   jo.INSTR_DOUANE         AS j_instr,
   RTRIM(t1.CUSTOM_CLEAR_NO) AS t1_no,
-  t1.CUSTOM_CLEAR_DT      AS t1_dt
+  t1.CUSTOM_CLEAR_DT      AS t1_dt,
+  del.actualdt            AS delivery_dt,
+  RTRIM(del.STATUT_DUANE) AS statut_douane,
+  RTRIM(del.TRANSPORTER)  AS transporter
 FROM console_jobdtls cj
 LEFT JOIN TBL_IMPFRA_CONSOLE_DOSSIER_OBSERVATION o
   ON o.CONSOLENO = RIGHT(RTRIM(cj.consoleno), 10)
@@ -369,6 +380,12 @@ OUTER APPLY (
   WHERE d.JOBNO = cj.jobno AND d.FK_CUSTOM_DOX_TYPE = 4
   ORDER BY d.CUSTOM_CLEAR_DT DESC
 ) t1
+OUTER APPLY (
+  SELECT TOP 1 dm.actualdt, dm.STATUT_DUANE, dm.TRANSPORTER
+  FROM expt_deliverymain dm
+  WHERE RTRIM(dm.codeno) = RTRIM(cj.jobno) AND RTRIM(dm.keyfield) = 'jobno'
+  ORDER BY dm.deliveryno DESC
+) del
 WHERE RTRIM(cj.exptno) IN (${inList})${hblClause};`);
     france.push(...fraRes.recordset);
   }
@@ -714,6 +731,9 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
       arrival_notice_date: anyToIso(fr?.rel_sent) ?? anyToIso(fr?.rel_print) ?? undefined,
       cpu_scr: fr ? str(fr.pincode) : undefined,
       ata: ata ?? undefined,
+      transporter: fr ? str(fr.transporter) : undefined,
+      delivery_date: anyToIso(fr?.delivery_dt) ?? undefined,
+      statut_douane: fr ? str(fr.statut_douane) : undefined,
       t1_no: fr ? str(fr.t1_no) : undefined,
       t1_date: anyToIso(fr?.t1_dt) ?? undefined,
       container_release_info:
