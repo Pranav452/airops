@@ -32,6 +32,16 @@ function ddmmyyyyToIso(v: unknown): string | null {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// datetime columns arrive as JS Dates from the driver; varchar dates as DD/MM/YYYY
+function anyToIso(v: unknown): string | null {
+  if (!v) return null;
+  if (v instanceof Date) {
+    if (v.getFullYear() <= 1900) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  return ddmmyyyyToIso(v);
+}
+
 function num(v: unknown): number | undefined {
   if (v === null || v === undefined) return undefined;
   const n = parseFloat(String(v).replace(/,/g, "").trim());
@@ -89,6 +99,7 @@ interface ErpContainerRow {
   agtsealno: string | null;
   custsealno: string | null;
   book_carr_nbr: string | null;
+  ata: unknown;
   exptno: string;
 }
 
@@ -97,14 +108,66 @@ interface ErpOrderRow {
   orderno: string | null;
 }
 
+// France import side (MP Cargo France) — console + dossier observations
+interface ErpFranceRow {
+  exptno: string;
+  hawbno: string | null;
+  jobno: string | null;
+  consoleno: string | null;
+  releasedt: unknown;
+  douaneno: string | null;
+  douanedt: unknown;
+  req_rdv: unknown;
+  conf_rdv: unknown;
+  odt: unknown;
+  instr_douane: unknown;
+  t1_recvd: unknown;
+  t1_sent: unknown;
+  shpline_invdt: unknown;
+  rel_print: unknown;
+  rel_sent: unknown;
+  pincode: string | null;
+  do_pin_trans: unknown;
+  j_req_rdv: unknown;
+  j_conf_rdv: unknown;
+  j_odt: unknown;
+  j_instr: unknown;
+  t1_no: string | null;
+  t1_dt: unknown;
+}
+
+interface ErpArrivalRow {
+  expt_vessel: string;
+  destination: string | null;
+  actualarrivaldt: unknown;
+}
+
 // ---------- status inference ----------
 // Forward-only ladder from India-side ERP signals. Names must match
 // airops_statuses.name (case-insensitive). France-side stages (RDV, ODT, …)
 // are managed manually in the dashboard and never downgraded by sync.
 
-function inferStatusName(j: ErpJobRow, jobContainers: ErpContainerRow[]): string {
+function inferStatusName(
+  j: ErpJobRow,
+  jobContainers: ErpContainerRow[],
+  fr: ErpFranceRow | undefined,
+  ata: string | null
+): string {
+  // France-side rungs (latest first)
+  if (fr) {
+    if (str(fr.t1_no) || anyToIso(fr.t1_recvd) || anyToIso(fr.t1_sent)) return "T1/IMA";
+    if (ata || ddmmyyyyToIso(j.arrivaldt)) return "ATA";
+    if (str(fr.pincode)) return "CPU/SCR";
+    if (anyToIso(fr.rel_sent) || anyToIso(fr.rel_print)) return "Arrival Notice";
+    if (anyToIso(fr.shpline_invdt)) return "FACTURE";
+    if (anyToIso(fr.j_instr) || anyToIso(fr.instr_douane)) return "Instructions Douane";
+    if (anyToIso(fr.j_odt) || anyToIso(fr.odt)) return "ODT";
+    if (anyToIso(fr.j_conf_rdv) || anyToIso(fr.j_req_rdv) || anyToIso(fr.conf_rdv) || anyToIso(fr.req_rdv)) return "RDV";
+    if (anyToIso(fr.releasedt) || anyToIso(fr.do_pin_trans)) return "Container Release";
+  }
+  // India-side rungs
   if (ddmmyyyyToIso(j.deliverydt)) return "Completed";
-  if (ddmmyyyyToIso(j.arrivaldt)) return "ATA";
+  if (ddmmyyyyToIso(j.arrivaldt) || ata) return "ATA";
   if (ddmmyyyyToIso(j.pol_sailing)) return "ETA"; // sailed → in transit
   if (str(j.expt_blno) || str(j.expt_hblno)) return "Bill of Lading";
   if (ddmmyyyyToIso(j.gate_in_dt)) return "Gate In";
@@ -167,51 +230,69 @@ function quoteList(values: string[]): string {
   return values.map((x) => `'${x.replace(/'/g, "''")}'`).join(",");
 }
 
-async function fetchErpRows(pastDays: number, futureDays: number) {
+// Dummy vessels the ops team uses to park jobs before real vessel assignment
+// (e.g. "MPC" with a far-future ETD). Jobs on these stay in Booking Request.
+const PLACEHOLDER_VESSELS = (process.env.ERP_PLACEHOLDER_VESSELS ?? "MPC")
+  .split(",")
+  .map((s) => s.trim().toUpperCase())
+  .filter(Boolean);
+
+export function isPlaceholderVessel(name: string | null | undefined): boolean {
+  const n = (name ?? "").trim().toUpperCase();
+  return !!n && PLACEHOLDER_VESSELS.includes(n);
+}
+
+async function fetchErpRows(pastDays: number) {
   const pool = await getErpPool();
 
-  // Stage 1: vessel rotations with an ETD inside the window (vsl_portdtls is
-  // small — filtering expt_master directly on the joined date times out).
-  const vres = await pool
-    .request()
-    .input("pastDays", pastDays)
-    .input("futureDays", futureDays)
-    .query<{ vsl_rtno: string }>(`
-SET DATEFORMAT dmy;
-SELECT DISTINCT RTRIM(vsl_rtno) AS vsl_rtno
-FROM vsl_portdtls
-WHERE ISDATE(etd) = 1
-  AND CONVERT(date, etd, 103)
-    BETWEEN DATEADD(day, -@pastDays, GETDATE()) AND DATEADD(day, @futureDays, GETDATE());`);
-  const rtnos = vres.recordset.map((r) => r.vsl_rtno).filter(Boolean);
-
-  // Stage 2: SEA jobs assigned to those vessels.
-  const jobs: ErpJobRow[] = [];
-  for (let i = 0; i < rtnos.length; i += 300) {
-    const batch = rtnos.slice(i, i + 300);
-    const res = await pool.request().query<ErpJobRow>(`${JOB_SELECT}
+  // Single pass: all current-year SEA jobs (~3k rows — cheap with simple
+  // WHERE; the window filter happens in JS because ERP dates are
+  // DD/MM/YYYY varchars and date-filtering the join times out).
+  const res = await pool.request().query<ErpJobRow>(`${JOB_SELECT}
 WHERE m.expt_mode = 'sea'
-  AND SUBSTRING(RTRIM(m.exptno), 6, 2) = RIGHT(CONVERT(varchar(4), YEAR(GETDATE())), 2)
-  AND RTRIM(m.expt_vessel) IN (${quoteList(batch)});`);
-    jobs.push(...res.recordset);
+  AND SUBSTRING(RTRIM(m.exptno), 6, 2) = RIGHT(CONVERT(varchar(4), YEAR(GETDATE())), 2);`);
+
+  // Keep a job when it has no usable ETD (backlog / placeholder vessel /
+  // not scheduled) or its ETD is no older than the past window. No upper
+  // bound — far-future ETDs are either real bookings or parking vessels.
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - pastDays);
+  const cutoffIso = cutoff.toISOString().slice(0, 10);
+
+  const jobs = res.recordset.filter((j) => {
+    const etd = ddmmyyyyToIso(j.pol_etd);
+    return !etd || etd >= cutoffIso;
+  });
+
+  // Strip placeholder vessels so their jobs read as "no vessel yet".
+  for (const j of jobs) {
+    if (isPlaceholderVessel(j.vsl_name)) {
+      j.expt_vessel = null;
+      j.vsl_name = null;
+      j.vsl_voyno = null;
+      j.pol_etd = null;
+      j.pol_eta = null;
+      j.pol_sailing = null;
+      j.pol_carting = null;
+      j.pod_eta = null;
+    }
   }
-
-  // Stage 3: recent SEA jobs not yet assigned to a vessel (newly booked).
-  const nres = await pool.request().query<ErpJobRow>(`${JOB_SELECT}
-WHERE m.expt_mode = 'sea'
-  AND SUBSTRING(RTRIM(m.exptno), 6, 2) = RIGHT(CONVERT(varchar(4), YEAR(GETDATE())), 2)
-  AND (m.expt_vessel IS NULL OR LTRIM(RTRIM(m.expt_vessel)) = '')
-  AND m.id > (SELECT MAX(id) - 1500 FROM expt_master);`);
-  jobs.push(...nres.recordset);
 
   if (jobs.length === 0) {
-    return { jobs, containers: [] as ErpContainerRow[], orders: [] as ErpOrderRow[] };
+    return {
+      jobs,
+      containers: [] as ErpContainerRow[],
+      orders: [] as ErpOrderRow[],
+      france: [] as ErpFranceRow[],
+      arrivals: [] as ErpArrivalRow[],
+    };
   }
 
-  // Containers + buyer orders for the synced jobs, fetched in batches of 500 keys.
+  // Containers, buyer orders + France milestones, fetched in batches of 500 keys.
   const exptnos = jobs.map((j) => j.exptno);
   const containers: ErpContainerRow[] = [];
   const orders: ErpOrderRow[] = [];
+  const france: ErpFranceRow[] = [];
 
   for (let i = 0; i < exptnos.length; i += 500) {
     const batch = exptnos.slice(i, i + 500);
@@ -227,6 +308,7 @@ SELECT
   RTRIM(cn.agtsealno)       AS agtsealno,
   RTRIM(cn.custsealno)      AS custsealno,
   RTRIM(cn.BOOK_CARR_NBR)   AS book_carr_nbr,
+  cn.ATA                    AS ata,
   RTRIM(j.exptno)           AS exptno
 FROM expt_container1 j
 JOIN expt_container cn ON cn.containerid = CAST(LTRIM(RTRIM(j.containerid)) AS int)
@@ -238,9 +320,73 @@ SELECT RTRIM(exptno) AS exptno, RTRIM(orderno) AS orderno
 FROM expt_orderno
 WHERE RTRIM(exptno) IN (${inList});`);
     orders.push(...ordRes.recordset);
+
+    // France import side: console job → dossier observations → T1 docs.
+    // Sea jobs link via HBL (console_jobdtls.hawbno = expt_hblno); the
+    // exptno column is only reliably filled for air consoles.
+    // TBL_IMPFRA_* tables key consoles by the last 10 chars of consoleno.
+    const batchJobs = jobs.slice(i, i + 500);
+    const hbls = batchJobs
+      .map((bj) => str(bj.expt_hblno))
+      .filter(Boolean) as string[];
+    const hblClause = hbls.length
+      ? ` OR RTRIM(cj.hawbno) IN (${quoteList(hbls)})`
+      : "";
+    const fraRes = await pool.request().query<ErpFranceRow>(`
+SELECT
+  RTRIM(cj.exptno)        AS exptno,
+  RTRIM(cj.hawbno)        AS hawbno,
+  RTRIM(cj.jobno)         AS jobno,
+  RTRIM(cj.consoleno)     AS consoleno,
+  cj.releasedt            AS releasedt,
+  RTRIM(cj.douaneno)      AS douaneno,
+  cj.douanedt             AS douanedt,
+  o.REQ_RDV               AS req_rdv,
+  o.CONF_RDV              AS conf_rdv,
+  o.ORD_DE_TRANS          AS odt,
+  o.INSTR_DOUANE          AS instr_douane,
+  o.T1_RECVD              AS t1_recvd,
+  o.T1_SENT               AS t1_sent,
+  o.SHPLINE_INVDT         AS shpline_invdt,
+  o.REL_PRINT             AS rel_print,
+  o.REL_SENT              AS rel_sent,
+  RTRIM(o.PINCODE)        AS pincode,
+  o.DO_PIN_TRANS          AS do_pin_trans,
+  jo.REQ_RDV              AS j_req_rdv,
+  jo.CONF_RDV             AS j_conf_rdv,
+  jo.ORD_DE_TRANS         AS j_odt,
+  jo.INSTR_DOUANE         AS j_instr,
+  RTRIM(t1.CUSTOM_CLEAR_NO) AS t1_no,
+  t1.CUSTOM_CLEAR_DT      AS t1_dt
+FROM console_jobdtls cj
+LEFT JOIN TBL_IMPFRA_CONSOLE_DOSSIER_OBSERVATION o
+  ON o.CONSOLENO = RIGHT(RTRIM(cj.consoleno), 10)
+LEFT JOIN TBL_IMPFRA_CONSOLE_JOB_DOSSIER_OBSERVATION jo
+  ON jo.JOBNO = cj.jobno
+OUTER APPLY (
+  SELECT TOP 1 d.CUSTOM_CLEAR_NO, d.CUSTOM_CLEAR_DT
+  FROM TBL_IMPFRA_CONSOLE_CUSTOM_DOX_DET d
+  WHERE d.JOBNO = cj.jobno AND d.FK_CUSTOM_DOX_TYPE = 4
+  ORDER BY d.CUSTOM_CLEAR_DT DESC
+) t1
+WHERE RTRIM(cj.exptno) IN (${inList})${hblClause};`);
+    france.push(...fraRes.recordset);
   }
 
-  return { jobs, containers, orders };
+  // Sea ATA per vessel rotation (expt_arrival is small).
+  const rtnoSet = Array.from(
+    new Set(jobs.map((j) => str(j.expt_vessel)).filter(Boolean))
+  ) as string[];
+  const arrivals: ErpArrivalRow[] = [];
+  for (let i = 0; i < rtnoSet.length; i += 500) {
+    const res = await pool.request().query<ErpArrivalRow>(`
+SELECT RTRIM(expt_vessel) AS expt_vessel, RTRIM(destination) AS destination, actualarrivaldt
+FROM expt_arrival
+WHERE RTRIM(expt_vessel) IN (${quoteList(rtnoSet.slice(i, i + 500))});`);
+    arrivals.push(...res.recordset);
+  }
+
+  return { jobs, containers, orders, france, arrivals };
 }
 
 // ---------- Supabase upserts ----------
@@ -260,7 +406,6 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
   const sb = admin();
   const warnings: string[] = [];
   const pastDays = Number(process.env.ERP_SYNC_ETD_PAST_DAYS ?? 45);
-  const futureDays = Number(process.env.ERP_SYNC_ETD_FUTURE_DAYS ?? 120);
 
   // 0. optional wipe of seed/demo rows (keeps airops_statuses)
   if (opts.wipe) {
@@ -276,7 +421,7 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
   }
 
   // 1. pull from ERP
-  const { jobs, containers, orders } = await fetchErpRows(pastDays, futureDays);
+  const { jobs, containers, orders, france, arrivals } = await fetchErpRows(pastDays);
 
   // 2. statuses lookup (name → id, display_order)
   const { data: statuses, error: stErr } = await sb
@@ -446,6 +591,36 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
     cIdx++;
   }
 
+  // 5a. France milestones per job — match by exptno (air) or HBL (sea)
+  const franceByExptno = new Map<string, ErpFranceRow>();
+  const franceByHbl = new Map<string, ErpFranceRow>();
+  for (const f of france) {
+    if (f.exptno && !franceByExptno.has(f.exptno)) franceByExptno.set(f.exptno, f);
+    const hbl = str(f.hawbno);
+    if (hbl && !franceByHbl.has(hbl)) franceByHbl.set(hbl, f);
+  }
+  const franceForJob = (j: ErpJobRow): ErpFranceRow | undefined => {
+    const byExpt = franceByExptno.get(j.exptno);
+    if (byExpt) return byExpt;
+    const hbl = str(j.expt_hblno);
+    return hbl ? franceByHbl.get(hbl) : undefined;
+  };
+  // Sea ATA: vessel-level arrivals, plus per-container ATA as fallback
+  const ataByRtno = new Map<string, string>();
+  for (const a of arrivals) {
+    const iso = anyToIso(a.actualarrivaldt);
+    if (!iso) continue;
+    const prev = ataByRtno.get(a.expt_vessel);
+    if (!prev || iso > prev) ataByRtno.set(a.expt_vessel, iso);
+  }
+  const ataByExptno = new Map<string, string>();
+  for (const c of containers) {
+    const iso = anyToIso(c.ata);
+    if (!iso) continue;
+    const prev = ataByExptno.get(c.exptno);
+    if (!prev || iso > prev) ataByExptno.set(c.exptno, iso);
+  }
+
   // 5. buyer orders per job
   const ordersOfJob = new Map<string, string[]>();
   for (const o of orders) {
@@ -456,14 +631,21 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
     ordersOfJob.set(o.exptno, list);
   }
 
-  // 6. jobs upsert
-  const { data: existingJobs, error: ejErr } = await sb
-    .from("airops_jobs")
-    .select("id, status_id, data")
-    .not("data->>erp_exp_number", "is", null);
-  if (ejErr) throw new Error(`select jobs: ${ejErr.message}`);
+  // 6. jobs upsert — paginate: Supabase caps a response at 1000 rows
+  const existingJobs: { id: string; status_id: string | null; data: AiropsJobData }[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await sb
+      .from("airops_jobs")
+      .select("id, status_id, data")
+      .not("data->>erp_exp_number", "is", null)
+      .order("id")
+      .range(from, from + 999);
+    if (error) throw new Error(`select jobs: ${error.message}`);
+    existingJobs.push(...(data ?? []));
+    if (!data || data.length < 1000) break;
+  }
   const existingJobByExptno = new Map(
-    (existingJobs ?? []).map((j) => [(j.data as AiropsJobData).erp_exp_number as string, j])
+    existingJobs.map((j) => [(j.data as AiropsJobData).erp_exp_number as string, j])
   );
 
   let jobsInserted = 0;
@@ -477,6 +659,10 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
       : null;
 
     const buyerOrders = ordersOfJob.get(j.exptno) ?? [];
+    const fr = franceForJob(j);
+    const ata =
+      ataByExptno.get(j.exptno) ??
+      (j.expt_vessel ? ataByRtno.get(j.expt_vessel.trim()) ?? null : null);
 
     const erpData: AiropsJobData = {
       erp_exp_number: j.exptno,
@@ -513,13 +699,32 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
       gate_in_done: !!ddmmyyyyToIso(j.gate_in_dt) || undefined,
       bl_released: !!str(j.expt_blno) || undefined,
       archived: false, // back in window → always unhide
+      // France import side (console dossier observations)
+      console_no_erp: fr ? str(fr.consoleno) : undefined,
+      rdv_date:
+        anyToIso(fr?.j_conf_rdv) ?? anyToIso(fr?.j_req_rdv) ??
+        anyToIso(fr?.conf_rdv) ?? anyToIso(fr?.req_rdv) ?? undefined,
+      odt_date: anyToIso(fr?.j_odt) ?? anyToIso(fr?.odt) ?? undefined,
+      odt_sent: fr ? !!(anyToIso(fr.j_odt) ?? anyToIso(fr.odt)) || undefined : undefined,
+      douane_amr_ref: fr ? str(fr.douaneno) : undefined,
+      douane_date:
+        anyToIso(fr?.douanedt) ?? anyToIso(fr?.j_instr) ?? anyToIso(fr?.instr_douane) ?? undefined,
+      shipping_line_inv: anyToIso(fr?.shpline_invdt) ?? undefined,
+      arrival_notice_sent: fr ? !!anyToIso(fr.rel_sent) || undefined : undefined,
+      arrival_notice_date: anyToIso(fr?.rel_sent) ?? anyToIso(fr?.rel_print) ?? undefined,
+      cpu_scr: fr ? str(fr.pincode) : undefined,
+      ata: ata ?? undefined,
+      t1_no: fr ? str(fr.t1_no) : undefined,
+      t1_date: anyToIso(fr?.t1_dt) ?? undefined,
+      container_release_info:
+        anyToIso(fr?.releasedt) ?? anyToIso(fr?.do_pin_trans) ?? undefined,
     };
     // drop undefined keys so we don't clobber dashboard-managed fields with null
     const cleanErpData = Object.fromEntries(
       Object.entries(erpData).filter(([, v]) => v !== undefined)
     );
 
-    const statusName = inferStatusName(j, jobContainers);
+    const statusName = inferStatusName(j, jobContainers, fr, ata);
     const inferredStatus = statusByName.get(statusName.toLowerCase());
     if (!inferredStatus) warnings.push(`status name not found: ${statusName}`);
 

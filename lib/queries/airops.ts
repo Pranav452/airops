@@ -37,26 +37,34 @@ export function useAiropsJobs(filters?: AiropsFilters) {
     queryKey: ["airops", "jobs", filters],
     queryFn: async () => {
       const sb = createClient();
-      let q = sb
-        .from("airops_jobs")
-        .select(
-          `*, status:airops_statuses(*), container:airops_containers(*, vessel:airops_vessels(*))`
-        )
-        // hide jobs archived by the ERP sync (sailed out of the sync window)
-        .or("data->>archived.is.null,data->>archived.neq.true")
-        .order("column_order")
-        .limit(5000);
+      // Supabase caps a single response at 1000 rows — page until exhausted.
+      const PAGE = 1000;
+      const all: AiropsJob[] = [];
+      for (let from = 0; ; from += PAGE) {
+        let q = sb
+          .from("airops_jobs")
+          .select(
+            `*, status:airops_statuses(*), container:airops_containers(*, vessel:airops_vessels(*))`
+          )
+          // hide jobs archived by the ERP sync (sailed out of the sync window)
+          .or("data->>archived.is.null,data->>archived.neq.true")
+          .order("column_order")
+          .order("id")
+          .range(from, from + PAGE - 1);
 
-      if (filters?.search) {
-        q = q.ilike("data->>order_no", `%${filters.search}%`);
-      }
-      if (filters?.vessel_id) {
-        q = q.eq("container.vessel_id", filters.vessel_id);
-      }
+        if (filters?.search) {
+          q = q.ilike("data->>order_no", `%${filters.search}%`);
+        }
+        if (filters?.vessel_id) {
+          q = q.eq("container.vessel_id", filters.vessel_id);
+        }
 
-      const { data, error } = await q;
-      if (error) throw error;
-      return data as AiropsJob[];
+        const { data, error } = await q;
+        if (error) throw error;
+        all.push(...(data as AiropsJob[]));
+        if (!data || data.length < PAGE) break;
+      }
+      return all;
     },
     staleTime: 30_000,
   });

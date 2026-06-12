@@ -72,6 +72,8 @@ export interface AiropsJobData {
   buyer_order_nos?: string;
   /** set true by ERP sync when the job leaves the sync window; hidden from board */
   archived?: boolean;
+  /** France console number from ERP console_jobdtls */
+  console_no_erp?: string;
   // Stuffing checklist
   si_filing_tick?: boolean;
   vgm_tick?: boolean;
