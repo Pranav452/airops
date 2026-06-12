@@ -462,19 +462,25 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
   const statusOrderById = new Map((statuses ?? []).map((s) => [s.id, s.display_order]));
 
   // 3. vessels — distinct rtno across jobs
-  const vesselMap = new Map<string, { name: string; etd: string | null; eta: string | null; pol: string | null; port_cutoff: string | null }>();
+  const vesselMap = new Map<string, { name: string; etd: string | null; eta: string | null; pol: string | null; pod: string | null; port_cutoff: string | null }>();
   for (const j of jobs) {
     const rt = str(j.expt_vessel);
     if (!rt || !str(j.vsl_name)) continue;
-    if (!vesselMap.has(rt)) {
+    const existing = vesselMap.get(rt);
+    if (!existing) {
       const voy = str(j.vsl_voyno);
       vesselMap.set(rt, {
         name: voy ? `${str(j.vsl_name)} / ${voy}` : str(j.vsl_name)!,
         etd: ddmmyyyyToIso(j.pol_etd),
         eta: ddmmyyyyToIso(j.pod_eta) ?? ddmmyyyyToIso(j.pol_eta),
         pol: str(j.expt_ldgport) ?? null,
+        pod: str(j.expt_pod) ?? null,
         port_cutoff: ddmmyyyyToIso(j.pol_carting),
       });
+    } else {
+      // fill blanks from later jobs on the same rotation
+      existing.eta = existing.eta ?? ddmmyyyyToIso(j.pod_eta) ?? ddmmyyyyToIso(j.pol_eta);
+      existing.pod = existing.pod ?? str(j.expt_pod) ?? null;
     }
   }
 
@@ -516,6 +522,7 @@ export async function runErpSync(opts: { wipe?: boolean } = {}): Promise<SyncRes
       etd: v.etd,
       eta: v.eta,
       pol: v.pol,
+      pod: v.pod,
       port_cutoff: v.port_cutoff,
     };
     if (hasErpVesselCol) row.erp_rtno = rtno;

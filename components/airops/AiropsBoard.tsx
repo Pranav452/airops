@@ -649,18 +649,22 @@ export function AiropsBoard() {
       {showFilterPanel && (
         <div className="px-5 py-3 shrink-0 flex items-start gap-6 flex-wrap" style={{ borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
           {/* Vessel */}
-          <div className="flex-1 min-w-[200px]">
+          <div className="min-w-[220px]">
             <p className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--text-3)" }}>Vessel</p>
-            <div className="flex flex-wrap gap-1.5">
-              <button onClick={() => setVesselFilter(null)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
-                style={{ background: !vesselFilter ? "#6366f1" : "var(--surface)", color: !vesselFilter ? "white" : "var(--text-2)", border: "1px solid var(--border)" }}>All</button>
-              {vessels.map((v) => (
-                <button key={v.id} onClick={() => setVesselFilter(v.id === vesselFilter ? null : v.id)} className="px-2.5 h-6 rounded-md text-xs font-medium transition-colors"
-                  style={{ background: vesselFilter === v.id ? "#6366f1" : "var(--surface)", color: vesselFilter === v.id ? "white" : "var(--text-2)", border: "1px solid var(--border)" }}>
-                  {v.name}
-                </button>
-              ))}
-            </div>
+            <select
+              value={vesselFilter ?? ""}
+              onChange={(e) => setVesselFilter(e.target.value || null)}
+              className="h-7 w-full max-w-[280px] rounded-md px-2 text-xs"
+              style={{ background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", outline: "none" }}>
+              <option value="">All vessels ({vessels.length})</option>
+              {[...vessels]
+                .sort((a, b) => (b.etd ?? "").localeCompare(a.etd ?? ""))
+                .map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name}{v.etd ? ` — ETD ${v.etd}` : ""}
+                  </option>
+                ))}
+            </select>
           </div>
 
           {/* POD */}

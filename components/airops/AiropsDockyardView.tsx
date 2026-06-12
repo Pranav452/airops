@@ -532,10 +532,18 @@ export function AiropsDockyardView() {
     );
   });
 
+  // Sort by arrival: upcoming ETAs first (soonest on top), already-arrived
+  // after (most recent first), undated last. ETD stands in when ETA missing.
+  const todayIso = new Date().toISOString().slice(0, 10);
   const vesselsSorted = [...vessels].sort((a, b) => {
-    if (!a.etd) return 1;
-    if (!b.etd) return -1;
-    return new Date(a.etd).getTime() - new Date(b.etd).getTime();
+    const ka = a.eta ?? a.etd ?? "";
+    const kb = b.eta ?? b.etd ?? "";
+    if (!ka) return 1;
+    if (!kb) return -1;
+    const aFuture = ka >= todayIso;
+    const bFuture = kb >= todayIso;
+    if (aFuture !== bFuture) return aFuture ? -1 : 1;
+    return aFuture ? ka.localeCompare(kb) : kb.localeCompare(ka);
   });
 
   // ── Drag ────────────────────────────────────────────────────────────────────

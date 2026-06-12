@@ -19,18 +19,8 @@ const NAV = [
       </svg>
     ),
   },
-  {
-    href: "/airops/canvas",
-    label: "Canvas",
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-        <circle cx="6" cy="8" r="2" />
-        <circle cx="18" cy="8" r="2" />
-        <circle cx="12" cy="17" r="2" />
-        <path d="M8 8h8M7 10l4 6M17 10l-4 6" />
-      </svg>
-    ),
-  },
+  // Canvas hidden: renders 3000+ draggable nodes with live ERP volume and
+  // hangs the browser. Route still exists; restore this entry if ever needed.
   {
     href: "/airops/dockyard",
     label: "Dockyard",
